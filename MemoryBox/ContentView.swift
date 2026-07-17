@@ -3,6 +3,7 @@
 //  MemoryBox
 //
 
+import CoreData
 import SwiftUI
 
 struct ContentView: View {
@@ -42,6 +43,12 @@ struct ContentView: View {
                     relationshipStart: relationshipStart,
                     hasRelationshipStart: hasRelationshipStart
                 )
+            }
+            .task {
+                await listenForRemoteStoreChanges()
+            }
+            .task {
+                await listenForMemoryStoreChanges()
             }
     }
 
@@ -217,6 +224,28 @@ struct ContentView: View {
                 relationshipStart: startDate,
                 hasRelationshipStart: startDateIsSet
             )
+        }
+    }
+
+    private func reloadFromStore() {
+        memories = MemoryStore.loadMemories()
+        letters = MemoryStore.loadLetters()
+        specialDays = MemoryStore.loadSpecialDays()
+        profile = MemoryStore.loadProfile()
+        relationshipStart = MemoryStore.loadStartDate()
+        hasRelationshipStart = MemoryStore.loadHasStartDate()
+        refreshNotificationSchedule()
+    }
+
+    private func listenForRemoteStoreChanges() async {
+        for await _ in NotificationCenter.default.notifications(named: .NSPersistentStoreRemoteChange) {
+            reloadFromStore()
+        }
+    }
+
+    private func listenForMemoryStoreChanges() async {
+        for await _ in NotificationCenter.default.notifications(named: .memoryStoreDidChange) {
+            reloadFromStore()
         }
     }
 }

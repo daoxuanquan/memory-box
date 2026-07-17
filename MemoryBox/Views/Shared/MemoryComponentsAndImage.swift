@@ -212,6 +212,21 @@ enum ImageFileStore {
         return try? Data(contentsOf: fileURL(for: relativePath))
     }
 
+    static func restoreIfNeeded(data: Data, relativePath: String) {
+        let fileURL = fileURL(for: relativePath)
+        guard !FileManager.default.fileExists(atPath: fileURL.path) else { return }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            assertionFailure("Unable to restore image file: \(error.localizedDescription)")
+        }
+    }
+
     #if canImport(UIKit)
     static func uiImage(for relativePath: String) -> UIImage? {
         UIImage(contentsOfFile: fileURL(for: relativePath).path)

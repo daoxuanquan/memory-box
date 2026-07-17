@@ -7,12 +7,16 @@ final class PersistenceController {
     let container: NSPersistentContainer
 
     init(inMemory: Bool = false) {
-        container = NSPersistentContainer(name: "MemoryBox", managedObjectModel: Self.makeModel())
-        container.persistentStoreDescriptions.first?.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
-        container.persistentStoreDescriptions.first?.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
+        let container = NSPersistentCloudKitContainer(name: "MemoryBox", managedObjectModel: Self.makeModel())
+        let storeDescription = container.persistentStoreDescriptions.first
+        storeDescription?.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
+        storeDescription?.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
+        storeDescription?.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        storeDescription?.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 
         if inMemory {
-            container.persistentStoreDescriptions.first?.url = URL(fileURLWithPath: "/dev/null")
+            storeDescription?.url = URL(fileURLWithPath: "/dev/null")
+            storeDescription?.cloudKitContainerOptions = nil
         }
 
         container.loadPersistentStores { _, error in
@@ -23,12 +27,37 @@ final class PersistenceController {
 
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         container.viewContext.automaticallyMergesChangesFromParent = true
+        self.container = container
+        observeCloudKitEvents()
+    }
+
+    private func observeCloudKitEvents() {
+        NotificationCenter.default.addObserver(
+            forName: NSPersistentCloudKitContainer.eventChangedNotification,
+            object: container,
+            queue: .main
+        ) { notification in
+            guard
+                let event = notification.userInfo?[NSPersistentCloudKitContainer.eventNotificationUserInfoKey] as? NSPersistentCloudKitContainer.Event,
+                event.endDate != nil
+            else { return }
+
+            if event.succeeded {
+                print("MemoryBox CloudKit \(event.type.logName) succeeded")
+                if event.type.shouldReloadLocalStore {
+                    NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
+                }
+            } else {
+                print("MemoryBox CloudKit \(event.type.logName) failed: \(event.error?.localizedDescription ?? "Unknown error")")
+            }
+        }
     }
 
     private static func makeModel() -> NSManagedObjectModel {
         let model = NSManagedObjectModel()
         model.entities = [
             makeMemoryEntity(),
+            makeMemoryPhotoEntity(),
             makeLetterEntity(),
             makeSpecialDayEntity(),
             makeSettingsEntity()
@@ -40,18 +69,31 @@ final class PersistenceController {
         entity(
             name: "StoredMemory",
             properties: [
-                attribute("id", type: .UUIDAttributeType),
-                attribute("title", type: .stringAttributeType),
-                attribute("date", type: .dateAttributeType),
-                attribute("place", type: .stringAttributeType),
-                attribute("note", type: .stringAttributeType),
+                attribute("id", type: .UUIDAttributeType, isOptional: true),
+                attribute("title", type: .stringAttributeType, isOptional: true),
+                attribute("date", type: .dateAttributeType, isOptional: true),
+                attribute("place", type: .stringAttributeType, isOptional: true),
+                attribute("note", type: .stringAttributeType, isOptional: true),
                 attribute("kindRawValue", type: .stringAttributeType, isOptional: true),
-                attribute("moodRawValue", type: .stringAttributeType),
-                attribute("symbolName", type: .stringAttributeType),
+                attribute("moodRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("symbolName", type: .stringAttributeType, isOptional: true),
                 attribute("imagePath", type: .stringAttributeType, isOptional: true),
                 attribute("imagePathsRaw", type: .stringAttributeType, isOptional: true),
                 attribute("imageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
-                attribute("isFavorite", type: .booleanAttributeType)
+                attribute("isFavorite", type: .booleanAttributeType, isOptional: true, defaultValue: false)
+            ]
+        )
+    }
+
+    private static func makeMemoryPhotoEntity() -> NSEntityDescription {
+        entity(
+            name: "StoredMemoryPhoto",
+            properties: [
+                attribute("id", type: .UUIDAttributeType, isOptional: true),
+                attribute("memoryID", type: .UUIDAttributeType, isOptional: true),
+                attribute("relativePath", type: .stringAttributeType, isOptional: true),
+                attribute("sortIndex", type: .integer64AttributeType, isOptional: true, defaultValue: 0),
+                attribute("imageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true)
             ]
         )
     }
@@ -60,10 +102,10 @@ final class PersistenceController {
         entity(
             name: "StoredLetter",
             properties: [
-                attribute("id", type: .UUIDAttributeType),
-                attribute("title", type: .stringAttributeType),
-                attribute("message", type: .stringAttributeType),
-                attribute("date", type: .dateAttributeType)
+                attribute("id", type: .UUIDAttributeType, isOptional: true),
+                attribute("title", type: .stringAttributeType, isOptional: true),
+                attribute("message", type: .stringAttributeType, isOptional: true),
+                attribute("date", type: .dateAttributeType, isOptional: true)
             ]
         )
     }
@@ -72,10 +114,10 @@ final class PersistenceController {
         entity(
             name: "StoredSpecialDay",
             properties: [
-                attribute("id", type: .UUIDAttributeType),
-                attribute("title", type: .stringAttributeType),
-                attribute("date", type: .dateAttributeType),
-                attribute("symbolName", type: .stringAttributeType)
+                attribute("id", type: .UUIDAttributeType, isOptional: true),
+                attribute("title", type: .stringAttributeType, isOptional: true),
+                attribute("date", type: .dateAttributeType, isOptional: true),
+                attribute("symbolName", type: .stringAttributeType, isOptional: true)
             ]
         )
     }
@@ -84,18 +126,18 @@ final class PersistenceController {
         entity(
             name: "AppSettings",
             properties: [
-                attribute("id", type: .stringAttributeType),
-                attribute("startDate", type: .dateAttributeType),
+                attribute("id", type: .stringAttributeType, isOptional: true),
+                attribute("startDate", type: .dateAttributeType, isOptional: true),
                 attribute("startDateIsSet", type: .booleanAttributeType, defaultValue: false),
-                attribute("firstName", type: .stringAttributeType),
-                attribute("firstAvatar", type: .stringAttributeType),
-                attribute("firstColorRawValue", type: .stringAttributeType),
+                attribute("firstName", type: .stringAttributeType, isOptional: true),
+                attribute("firstAvatar", type: .stringAttributeType, isOptional: true),
+                attribute("firstColorRawValue", type: .stringAttributeType, isOptional: true),
                 attribute("firstImagePath", type: .stringAttributeType, isOptional: true),
                 attribute("firstAvatarSize", type: .doubleAttributeType, defaultValue: CoupleProfile.defaultAvatarSize),
                 attribute("firstImageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
-                attribute("secondName", type: .stringAttributeType),
-                attribute("secondAvatar", type: .stringAttributeType),
-                attribute("secondColorRawValue", type: .stringAttributeType),
+                attribute("secondName", type: .stringAttributeType, isOptional: true),
+                attribute("secondAvatar", type: .stringAttributeType, isOptional: true),
+                attribute("secondColorRawValue", type: .stringAttributeType, isOptional: true),
                 attribute("secondImagePath", type: .stringAttributeType, isOptional: true),
                 attribute("secondAvatarSize", type: .doubleAttributeType, defaultValue: CoupleProfile.defaultAvatarSize),
                 attribute("secondImageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true)
@@ -128,6 +170,32 @@ final class PersistenceController {
     }
 }
 
+private extension NSPersistentCloudKitContainer.EventType {
+    var logName: String {
+        switch self {
+        case .setup:
+            return "setup"
+        case .import:
+            return "import"
+        case .export:
+            return "export"
+        @unknown default:
+            return "event"
+        }
+    }
+
+    var shouldReloadLocalStore: Bool {
+        switch self {
+        case .setup, .import:
+            return true
+        case .export:
+            return false
+        @unknown default:
+            return true
+        }
+    }
+}
+
 @MainActor
 enum MemoryStore {
     private static let memoriesKey = "memoryLove.memories"
@@ -142,14 +210,20 @@ enum MemoryStore {
 
     static func loadMemories() -> [LoveMemory] {
         migrateUserDefaultsIfNeeded()
-        return fetchObjects(entityName: "StoredMemory", sortDescriptors: [NSSortDescriptor(key: "date", ascending: false)]).compactMap(makeMemory)
+        let photosByMemoryID = fetchMemoryPhotos()
+        return fetchObjects(entityName: "StoredMemory", sortDescriptors: [NSSortDescriptor(key: "date", ascending: false)])
+            .compactMap { makeMemory(from: $0, photosByMemoryID: photosByMemoryID) }
     }
 
     static func save(memories: [LoveMemory]) {
         migrateUserDefaultsIfNeeded()
-        replace(entityName: "StoredMemory") { entity in
+        replace(entityName: "StoredMemory", shouldSave: false) { entity in
             memories.forEach { insert($0, into: entity) }
         }
+        replace(entityName: "StoredMemoryPhoto", shouldSave: false) { entity in
+            memories.forEach { insertPhotos(for: $0, into: entity) }
+        }
+        saveContext()
     }
 
     static func loadLetters() -> [LoveLetter] {
@@ -178,7 +252,12 @@ enum MemoryStore {
 
     static func loadProfile() -> CoupleProfile {
         migrateUserDefaultsIfNeeded()
-        return settingsObject().flatMap(makeProfile) ?? .empty
+        guard let settings = settingsObject(),
+              let profile = makeProfile(from: settings)
+        else { return .empty }
+
+        backfillProfileImageDataIfNeeded(in: settings, profile: profile)
+        return profile
     }
 
     static func save(profile: CoupleProfile) {
@@ -232,6 +311,9 @@ enum MemoryStore {
         replace(entityName: "StoredMemory", shouldSave: false) { object in
             memories.forEach { insert($0, into: object) }
         }
+        replace(entityName: "StoredMemoryPhoto", shouldSave: false) { object in
+            memories.forEach { insertPhotos(for: $0, into: object) }
+        }
         replace(entityName: "StoredLetter", shouldSave: false) { object in
             letters.forEach { insert($0, into: object) }
         }
@@ -279,6 +361,17 @@ enum MemoryStore {
         object.setValue(memory.isFavorite, forKey: "isFavorite")
     }
 
+    private static func insertPhotos(for memory: LoveMemory, into entity: NSEntityDescription) {
+        for (index, imagePath) in memory.imagePaths.enumerated() {
+            let object = NSManagedObject(entity: entity, insertInto: context)
+            object.setValue(UUID(), forKey: "id")
+            object.setValue(memory.id, forKey: "memoryID")
+            object.setValue(imagePath, forKey: "relativePath")
+            object.setValue(Int64(index), forKey: "sortIndex")
+            object.setValue(ImageFileStore.data(for: imagePath), forKey: "imageData")
+        }
+    }
+
     private static func insert(_ letter: LoveLetter, into entity: NSEntityDescription) {
         let object = NSManagedObject(entity: entity, insertInto: context)
         object.setValue(letter.id, forKey: "id")
@@ -295,7 +388,7 @@ enum MemoryStore {
         object.setValue(day.symbolName, forKey: "symbolName")
     }
 
-    private static func makeMemory(from object: NSManagedObject) -> LoveMemory? {
+    private static func makeMemory(from object: NSManagedObject, photosByMemoryID: [UUID: [String]]) -> LoveMemory? {
         guard
             let id = object.value(forKey: "id") as? UUID,
             let title = object.value(forKey: "title") as? String,
@@ -310,7 +403,11 @@ enum MemoryStore {
         let kind = (object.value(forKey: "kindRawValue") as? String).flatMap(MemoryKind.init(rawValue:)) ?? .special
         let imagePath = object.value(forKey: "imagePath") as? String
             ?? ImageFileStore.save(data: object.value(forKey: "imageData") as? Data, category: "memories", id: id.uuidString)
-        let imagePaths = (decodedImagePaths(from: object.value(forKey: "imagePathsRaw") as? String) + (imagePath.map { [$0] } ?? [])).uniqued()
+        let imagePaths = (
+            photosByMemoryID[id] ?? []
+            + decodedImagePaths(from: object.value(forKey: "imagePathsRaw") as? String)
+            + (imagePath.map { [$0] } ?? [])
+        ).uniqued()
         let isFavorite = object.value(forKey: "isFavorite") as? Bool ?? false
 
         return LoveMemory(
@@ -325,6 +422,31 @@ enum MemoryStore {
             imagePaths: imagePaths,
             isFavorite: isFavorite
         )
+    }
+
+    private static func fetchMemoryPhotos() -> [UUID: [String]] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: "StoredMemoryPhoto")
+        request.sortDescriptors = [
+            NSSortDescriptor(key: "memoryID", ascending: true),
+            NSSortDescriptor(key: "sortIndex", ascending: true)
+        ]
+
+        let objects = (try? context.fetch(request)) ?? []
+        var pathsByMemoryID: [UUID: [String]] = [:]
+
+        for object in objects {
+            guard
+                let memoryID = object.value(forKey: "memoryID") as? UUID,
+                let relativePath = object.value(forKey: "relativePath") as? String
+            else { continue }
+
+            if let imageData = object.value(forKey: "imageData") as? Data {
+                ImageFileStore.restoreIfNeeded(data: imageData, relativePath: relativePath)
+            }
+            pathsByMemoryID[memoryID, default: []].append(relativePath)
+        }
+
+        return pathsByMemoryID.mapValues { $0.uniqued() }
     }
 
     private static func makeLetter(from object: NSManagedObject) -> LoveLetter? {
@@ -350,31 +472,61 @@ enum MemoryStore {
     }
 
     private static func makeProfile(from object: NSManagedObject) -> CoupleProfile? {
-        guard
-            let firstName = object.value(forKey: "firstName") as? String,
-            let firstAvatar = object.value(forKey: "firstAvatar") as? String,
-            let firstColorRawValue = object.value(forKey: "firstColorRawValue") as? String,
-            let firstColor = AvatarColor(rawValue: firstColorRawValue),
-            let secondName = object.value(forKey: "secondName") as? String,
-            let secondAvatar = object.value(forKey: "secondAvatar") as? String,
-            let secondColorRawValue = object.value(forKey: "secondColorRawValue") as? String,
-            let secondColor = AvatarColor(rawValue: secondColorRawValue)
-        else { return nil }
+        let emptyProfile = CoupleProfile.empty
+        let firstColorRawValue = object.value(forKey: "firstColorRawValue") as? String
+        let secondColorRawValue = object.value(forKey: "secondColorRawValue") as? String
 
         return CoupleProfile(
-            firstName: firstName,
-            firstAvatar: firstAvatar,
-            firstColor: firstColor,
-            firstImagePath: object.value(forKey: "firstImagePath") as? String
-                ?? ImageFileStore.save(data: object.value(forKey: "firstImageData") as? Data, category: "profiles", id: "first"),
+            firstName: object.value(forKey: "firstName") as? String ?? emptyProfile.firstName,
+            firstAvatar: object.value(forKey: "firstAvatar") as? String ?? emptyProfile.firstAvatar,
+            firstColor: firstColorRawValue.flatMap(AvatarColor.init(rawValue:)) ?? emptyProfile.firstColor,
+            firstImagePath: restoredProfileImagePath(
+                path: object.value(forKey: "firstImagePath") as? String,
+                data: object.value(forKey: "firstImageData") as? Data,
+                id: "first"
+            ),
             firstAvatarSize: object.value(forKey: "firstAvatarSize") as? Double ?? CoupleProfile.defaultAvatarSize,
-            secondName: secondName,
-            secondAvatar: secondAvatar,
-            secondColor: secondColor,
-            secondImagePath: object.value(forKey: "secondImagePath") as? String
-                ?? ImageFileStore.save(data: object.value(forKey: "secondImageData") as? Data, category: "profiles", id: "second"),
+            secondName: object.value(forKey: "secondName") as? String ?? emptyProfile.secondName,
+            secondAvatar: object.value(forKey: "secondAvatar") as? String ?? emptyProfile.secondAvatar,
+            secondColor: secondColorRawValue.flatMap(AvatarColor.init(rawValue:)) ?? emptyProfile.secondColor,
+            secondImagePath: restoredProfileImagePath(
+                path: object.value(forKey: "secondImagePath") as? String,
+                data: object.value(forKey: "secondImageData") as? Data,
+                id: "second"
+            ),
             secondAvatarSize: object.value(forKey: "secondAvatarSize") as? Double ?? CoupleProfile.defaultAvatarSize
         )
+    }
+
+    private static func restoredProfileImagePath(path: String?, data: Data?, id: String) -> String? {
+        if let path {
+            if let data {
+                ImageFileStore.restoreIfNeeded(data: data, relativePath: path)
+            }
+            return path
+        }
+
+        return ImageFileStore.save(data: data, category: "profiles", id: id)
+    }
+
+    private static func backfillProfileImageDataIfNeeded(in settings: NSManagedObject, profile: CoupleProfile) {
+        var didUpdate = false
+
+        if settings.value(forKey: "firstImageData") == nil,
+           let firstImageData = ImageFileStore.data(for: profile.firstImagePath) {
+            settings.setValue(firstImageData, forKey: "firstImageData")
+            didUpdate = true
+        }
+
+        if settings.value(forKey: "secondImageData") == nil,
+           let secondImageData = ImageFileStore.data(for: profile.secondImagePath) {
+            settings.setValue(secondImageData, forKey: "secondImageData")
+            didUpdate = true
+        }
+
+        if didUpdate {
+            saveContext()
+        }
     }
 
     private static func update(settings: NSManagedObject, profile: CoupleProfile, startDate: Date, startDateIsSet: Bool) {
@@ -386,13 +538,13 @@ enum MemoryStore {
         settings.setValue(profile.firstColor.rawValue, forKey: "firstColorRawValue")
         settings.setValue(profile.firstImagePath, forKey: "firstImagePath")
         settings.setValue(profile.firstAvatarSize, forKey: "firstAvatarSize")
-        settings.setValue(nil, forKey: "firstImageData")
+        settings.setValue(ImageFileStore.data(for: profile.firstImagePath), forKey: "firstImageData")
         settings.setValue(profile.secondName, forKey: "secondName")
         settings.setValue(profile.secondAvatar, forKey: "secondAvatar")
         settings.setValue(profile.secondColor.rawValue, forKey: "secondColorRawValue")
         settings.setValue(profile.secondImagePath, forKey: "secondImagePath")
         settings.setValue(profile.secondAvatarSize, forKey: "secondAvatarSize")
-        settings.setValue(nil, forKey: "secondImageData")
+        settings.setValue(ImageFileStore.data(for: profile.secondImagePath), forKey: "secondImageData")
     }
 
     private static func currentStartDate() -> Date {

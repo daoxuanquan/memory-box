@@ -5,6 +5,10 @@
 
 import Foundation
 
+extension Notification.Name {
+    static let memoryStoreDidChange = Notification.Name("memoryStoreDidChange")
+}
+
 extension Date {
     var startOfDay: Date {
         Calendar.current.startOfDay(for: self)
