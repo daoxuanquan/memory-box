@@ -44,6 +44,24 @@ enum LoveNotificationScheduler {
         }
     }
 
+    static func notifyRemoteCoupleUpdate() async {
+        configureForegroundPresentation()
+        guard await ensureAuthorization() else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "MemoryBox vừa có cập nhật"
+        content.body = "Người kia đã thêm hoặc chỉnh sửa dữ liệu trong không gian chung."
+        content.sound = .default
+        content.categoryIdentifier = "MEMORYBOX_REMOTE_UPDATE"
+
+        let request = UNNotificationRequest(
+            identifier: "\(identifierPrefix)remote.\(UUID().uuidString)",
+            content: content,
+            trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        )
+        await add(request)
+    }
+
     private static func configureForegroundPresentation() {
         center.delegate = delegate
     }

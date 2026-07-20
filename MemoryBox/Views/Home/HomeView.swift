@@ -18,6 +18,7 @@ struct HomeView: View {
     let upcomingDays: [SpecialDay]
     let hasUserContent: Bool
     let onAddMemory: () -> Void
+    let onOpenSettings: () -> Void
     let onEditProfile: (ProfilePerson) -> Void
     let onSetRelationshipStart: (Date) -> Void
     let onUpdateMemory: (LoveMemory) -> Void
@@ -83,6 +84,14 @@ struct HomeView: View {
                 }
             }
             .navigationTitle("Memory Love")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: onOpenSettings) {
+                        Image(systemName: "gearshape.fill")
+                    }
+                    .accessibilityLabel("Cài đặt")
+                }
+            }
             .sheet(isPresented: $showingStartDateEditor) {
                 relationshipStartEditor
             }

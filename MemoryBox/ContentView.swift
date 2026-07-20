@@ -75,6 +75,7 @@ struct ContentView: View {
             upcomingDays: upcomingSpecialDays,
             hasUserContent: hasUserContent,
             onAddMemory: showAddMemory,
+            onOpenSettings: showSettings,
             onEditProfile: showEditProfile,
             onSetRelationshipStart: saveRelationshipStart,
             onUpdateMemory: updateMemory
@@ -126,6 +127,8 @@ struct ContentView: View {
             SpecialDayEditorView(mode: .add, onSave: saveSpecialDay)
         case .profile(let person):
             EditProfileView(profile: profile, person: person, onSave: saveProfile)
+        case .settings:
+            SettingsView()
         }
     }
 
@@ -139,6 +142,10 @@ struct ContentView: View {
 
     private func showAddSpecialDay() {
         activeSheet = .specialDay
+    }
+
+    private func showSettings() {
+        activeSheet = .settings
     }
 
     private func showEditProfile(_ person: ProfilePerson) {
@@ -255,6 +262,7 @@ enum ActiveSheet: Identifiable {
     case letter
     case specialDay
     case profile(ProfilePerson)
+    case settings
 
     var id: String {
         switch self {
@@ -266,6 +274,8 @@ enum ActiveSheet: Identifiable {
             return "specialDay"
         case .profile(let person):
             return "profile-\(person.rawValue)"
+        case .settings:
+            return "settings"
         }
     }
 }

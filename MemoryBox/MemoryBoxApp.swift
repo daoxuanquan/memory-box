@@ -9,6 +9,8 @@ import SwiftUI
 
 @main
 struct MemoryBoxApp: App {
+    @UIApplicationDelegateAdaptor(MemoryBoxAppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
