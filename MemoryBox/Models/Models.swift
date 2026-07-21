@@ -174,18 +174,122 @@ enum MemoryMood: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-struct LoveLetter: Identifiable, Codable {
-    let id: UUID
-    var title: String
-    var message: String
-    var date: Date
+enum MessageSenderRole: String, Codable, CaseIterable {
+    case first
+    case second
+}
 
-    init(id: UUID = UUID(), title: String, message: String, date: Date) {
-        self.id = id
-        self.title = title
-        self.message = message
-        self.date = date
+enum MessageMood: String, CaseIterable, Codable, Identifiable {
+    case sweet = "Ngọt ngào"
+    case angry = "Giận dữ"
+    case romantic = "Lãng mạn"
+    case missing = "Nhớ nhung"
+    case playful = "Tinh nghịch"
+    case grateful = "Biết ơn"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .sweet: return "heart.fill"
+        case .angry: return "flame.fill"
+        case .romantic: return "sparkles"
+        case .missing: return "moon.stars.fill"
+        case .playful: return "face.smiling"
+        case .grateful: return "hands.sparkles.fill"
+        }
     }
+
+    var color: Color {
+        switch self {
+        case .sweet: return .pink
+        case .angry: return .red
+        case .romantic: return .purple
+        case .missing: return .blue
+        case .playful: return .orange
+        case .grateful: return .green
+        }
+    }
+}
+
+enum MessageReaction: String, CaseIterable, Codable, Identifiable {
+    case heart
+    case kiss
+    case hug
+    case sparkle
+    case fire
+
+    var id: String { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .heart: return "❤️"
+        case .kiss: return "💋"
+        case .hug: return "🤗"
+        case .sparkle: return "✨"
+        case .fire: return "🔥"
+        }
+    }
+}
+
+struct LoveMessage: Identifiable, Codable, Equatable {
+    static let currentSchemaVersion = 1
+
+    let id: UUID
+    var message: String
+    var sentAt: Date
+    var senderRole: MessageSenderRole
+    var imageData: Data?
+    var mood: MessageMood
+    var reaction: MessageReaction?
+    var replyToID: UUID?
+    var isRead: Bool
+    var readAt: Date?
+    var isFavorite: Bool
+    var schemaVersion: Int
+
+    init(
+        id: UUID = UUID(),
+        message: String,
+        sentAt: Date = Date(),
+        senderRole: MessageSenderRole,
+        imageData: Data? = nil,
+        mood: MessageMood = .sweet,
+        reaction: MessageReaction? = nil,
+        replyToID: UUID? = nil,
+        isRead: Bool = false,
+        readAt: Date? = nil,
+        isFavorite: Bool = false,
+        schemaVersion: Int = LoveMessage.currentSchemaVersion
+    ) {
+        self.id = id
+        self.message = message
+        self.sentAt = sentAt
+        self.senderRole = senderRole
+        self.imageData = imageData
+        self.mood = mood
+        self.reaction = reaction
+        self.replyToID = replyToID
+        self.isRead = isRead
+        self.readAt = readAt
+        self.isFavorite = isFavorite
+        self.schemaVersion = schemaVersion
+    }
+
+    var hasImage: Bool {
+        imageData != nil
+    }
+
+    var hasText: Bool {
+        !message.trimmed.isEmpty
+    }
+}
+
+struct LoveMessageDraft {
+    var message: String
+    var mood: MessageMood
+    var imageData: Data?
+    var replyToID: UUID?
 }
 
 struct SpecialDay: Identifiable, Codable {

@@ -4,6 +4,16 @@
 //
 
 import Foundation
+import os
+
+enum MemoryLog {
+    private static let sharing = Logger(subsystem: "quan.memory.box.MemoryBox", category: "sharing")
+
+    static func share(_ message: String) {
+        sharing.log("[MemoryBox][Share] \(message, privacy: .public)")
+        print("[MemoryBox][Share] \(message)")
+    }
+}
 
 extension Notification.Name {
     static let memoryStoreDidChange = Notification.Name("memoryStoreDidChange")

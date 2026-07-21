@@ -10,10 +10,13 @@ import UserNotifications
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var showingCloudShare = false
+    @State private var preparedShare: PreparedShare?
+    @State private var isPreparingShare = false
+    @State private var shareErrorText: String?
     @State private var iCloudStatusText = "Đang kiểm tra..."
     @State private var notificationStatusText = "Đang kiểm tra..."
     @State private var isUsingSharedSpace = false
+    @State private var selectedAppIcon: AppIconChoice = .dragonBulliesPig
 
     var body: some View {
         NavigationStack {
@@ -23,11 +26,17 @@ struct SettingsView: View {
                     LabeledContent("Thông báo", value: notificationStatusText)
 
                     Button {
-                        showingCloudShare = true
+                        prepareShare()
                     } label: {
-                        Label("Mời ai đó chia sẻ dữ liệu", systemImage: "person.badge.plus")
+                        HStack {
+                            Label("Mời ai đó chia sẻ dữ liệu", systemImage: "person.badge.plus")
+                            if isPreparingShare {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
                     }
-                    .disabled(isUsingSharedSpace)
+                    .disabled(isUsingSharedSpace || isPreparingShare)
 
                     Text(shareHelpText)
                         .font(.footnote)
@@ -47,6 +56,23 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+
+                Section("Icon ứng dụng") {
+                    Picker("Chọn icon", selection: $selectedAppIcon) {
+                        ForEach(AppIconChoice.allCases) { choice in
+                            Text(choice.title).tag(choice)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .onChange(of: selectedAppIcon) { _, choice in
+                        AppIconManager.setIcon(choice)
+                        MemoryStore.save(appIcon: choice)
+                    }
+
+                    Text("Lựa chọn icon sẽ đồng bộ qua iCloud để thiết bị của cả hai người cùng đổi.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Cài đặt")
             .navigationBarTitleDisplayMode(.inline)
@@ -57,11 +83,18 @@ struct SettingsView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showingCloudShare) {
-                CoupleCloudSharingView()
-                    .ignoresSafeArea()
+            .sheet(item: $preparedShare) { prepared in
+                ShareInviteSheet(share: prepared.share)
+            }
+            .alert("Không tạo được link chia sẻ", isPresented: shareErrorBinding) {
+                Button("Đóng", role: .cancel) { shareErrorText = nil }
+            } message: {
+                Text(shareErrorText ?? "")
             }
             .task {
+                let syncedChoice = MemoryStore.loadAppIconChoice()
+                selectedAppIcon = syncedChoice
+                AppIconManager.setIcon(syncedChoice)
                 refreshShareState()
                 await refreshCloudStatus()
                 await refreshNotificationPermission(requestIfNeeded: false)
@@ -77,6 +110,30 @@ struct SettingsView: View {
         return "Người được mời cần đăng nhập iCloud, cài MemoryBox và chấp nhận link mời. Sau đó dữ liệu trong không gian chung sẽ đồng bộ qua CloudKit."
     }
 
+    private var shareErrorBinding: Binding<Bool> {
+        Binding(
+            get: { shareErrorText != nil },
+            set: { if !$0 { shareErrorText = nil } }
+        )
+    }
+
+    private func prepareShare() {
+        MemoryLog.share("SettingsView: bấm nút 'Mời ai đó chia sẻ' (isUsingSharedSpace=\(isUsingSharedSpace))")
+        guard !isPreparingShare else { return }
+        isPreparingShare = true
+        MemoryStore.prepareCoupleShare { share, container, error in
+            isPreparingShare = false
+            if let share, let container {
+                MemoryLog.share("SettingsView: share sẵn sàng -> present controller")
+                preparedShare = PreparedShare(share: share, container: container)
+            } else {
+                let message = error?.localizedDescription ?? "Lỗi không xác định"
+                MemoryLog.share("SettingsView: chuẩn bị share thất bại: \(message)")
+                shareErrorText = message
+            }
+        }
+    }
+
     private func refreshShareState() {
         isUsingSharedSpace = MemoryStore.isUsingSharedCoupleSpace()
     }
@@ -86,8 +143,10 @@ struct SettingsView: View {
         do {
             let status = try await container.accountStatus()
             iCloudStatusText = status.displayText
+            MemoryLog.share("SettingsView: iCloud accountStatus=\(status.displayText)")
         } catch {
             iCloudStatusText = "Không kiểm tra được"
+            MemoryLog.share("SettingsView: accountStatus lỗi: \(error.localizedDescription)")
         }
     }
 
@@ -113,37 +172,80 @@ struct SettingsView: View {
     }
 }
 
-struct CoupleCloudSharingView: UIViewControllerRepresentable {
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+struct PreparedShare: Identifiable {
+    let share: CKShare
+    let container: CKContainer
 
-    func makeUIViewController(context: Context) -> UICloudSharingController {
-        let controller = UICloudSharingController { _, completion in
-            MemoryStore.prepareCoupleShare(completion: completion)
-        }
-        controller.delegate = context.coordinator
-        controller.availablePermissions = [.allowPrivate, .allowReadWrite]
-        return controller
-    }
+    var id: String { share.url?.absoluteString ?? share.recordID.recordName }
+}
 
-    func updateUIViewController(_ uiViewController: UICloudSharingController, context: Context) { }
+struct ShareInviteSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let share: CKShare
+    @State private var didCopy = false
 
-    final class Coordinator: NSObject, UICloudSharingControllerDelegate {
-        func itemTitle(for csc: UICloudSharingController) -> String? {
-            "MemoryBox của hai người"
-        }
+    private var link: URL? { share.url }
 
-        func cloudSharingControllerDidSaveShare(_ csc: UICloudSharingController) {
-            NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
-        }
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Image(systemName: "link.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.pink)
+                    .padding(.top, 24)
 
-        func cloudSharingControllerDidStopSharing(_ csc: UICloudSharingController) {
-            NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
-        }
+                Text("Gửi link này cho người ấy")
+                    .font(.title3.bold())
 
-        func cloudSharingController(_ csc: UICloudSharingController, failedToSaveShareWithError error: Error) {
-            print("MemoryBox CloudKit share failed: \(error.localizedDescription)")
+                Text("Người nhận cần đăng nhập iCloud và đã cài MemoryBox. Bấm vào link để tham gia và cùng chỉnh sửa.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+
+                if let link {
+                    Text(link.absoluteString)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal)
+
+                    Button {
+                        UIPasteboard.general.url = link
+                        didCopy = true
+                    } label: {
+                        Label(didCopy ? "Đã sao chép" : "Sao chép link", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.pink)
+                    .padding(.horizontal)
+
+                    ShareLink(item: link) {
+                        Label("Chia sẻ qua ứng dụng khác", systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal)
+                } else {
+                    Text("Chưa lấy được link chia sẻ. Vui lòng thử lại.")
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+            .navigationTitle("Mời chia sẻ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Đóng") { dismiss() }
+                }
+            }
         }
     }
 }

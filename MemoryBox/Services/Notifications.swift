@@ -44,6 +44,24 @@ enum LoveNotificationScheduler {
         }
     }
 
+    static func notifyNewLoveMessage() async {
+        configureForegroundPresentation()
+        guard await ensureAuthorization() else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Có tin nhắn yêu thương"
+        content.body = "Bạn có một tin nhắn yêu thương đang chờ bạn mở."
+        content.sound = .default
+        content.categoryIdentifier = "MEMORYBOX_LOVE_MESSAGE"
+
+        let request = UNNotificationRequest(
+            identifier: "\(identifierPrefix)loveMessage.\(UUID().uuidString)",
+            content: content,
+            trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        )
+        await add(request)
+    }
+
     static func notifyRemoteCoupleUpdate() async {
         configureForegroundPresentation()
         guard await ensureAuthorization() else { return }

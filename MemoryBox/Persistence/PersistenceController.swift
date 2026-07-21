@@ -54,6 +54,15 @@ final class PersistenceController {
         observeCloudKitEvents()
     }
 
+    /// A private-queue context for reading off the main thread. Each read gets its own
+    /// context so concurrent loads never touch the same context from different threads.
+    func newReadContext() -> NSManagedObjectContext {
+        let context = container.newBackgroundContext()
+        context.automaticallyMergesChangesFromParent = true
+        context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        return context
+    }
+
     private static func storeDescription(filename: String, scope: CKDatabase.Scope, inMemory: Bool) -> NSPersistentStoreDescription {
         let storeURL = inMemory
             ? URL(fileURLWithPath: "/dev/null")
@@ -83,10 +92,11 @@ final class PersistenceController {
             if event.succeeded {
                 print("MemoryBox CloudKit \(event.type.logName) succeeded")
                 if event.type.shouldReloadLocalStore {
-                    NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
-                    if event.type.shouldNotifyRemoteUpdate {
-                        Task {
-                            await LoveNotificationScheduler.notifyRemoteCoupleUpdate()
+                    Task { @MainActor in
+                        MemoryStore.reconcileAfterCloudSync()
+                        NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
+                        if event.type.shouldNotifyRemoteUpdate {
+                            await MemoryStore.notifyAfterRemoteImportIfNeeded()
                         }
                     }
                 }
@@ -208,7 +218,16 @@ final class PersistenceController {
                 attribute("id", type: .UUIDAttributeType, isOptional: true),
                 attribute("title", type: .stringAttributeType, isOptional: true),
                 attribute("message", type: .stringAttributeType, isOptional: true),
-                attribute("date", type: .dateAttributeType, isOptional: true)
+                attribute("date", type: .dateAttributeType, isOptional: true),
+                attribute("senderRoleRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("imageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
+                attribute("moodRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("reactionRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("replyToID", type: .UUIDAttributeType, isOptional: true),
+                attribute("isRead", type: .booleanAttributeType, defaultValue: false),
+                attribute("readAt", type: .dateAttributeType, isOptional: true),
+                attribute("isFavorite", type: .booleanAttributeType, defaultValue: false),
+                attribute("schemaVersion", type: .integer64AttributeType, defaultValue: 0)
             ]
         )
     }
@@ -243,7 +262,8 @@ final class PersistenceController {
                 attribute("secondColorRawValue", type: .stringAttributeType, isOptional: true),
                 attribute("secondImagePath", type: .stringAttributeType, isOptional: true),
                 attribute("secondAvatarSize", type: .doubleAttributeType, defaultValue: CoupleProfile.defaultAvatarSize),
-                attribute("secondImageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true)
+                attribute("secondImageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
+                attribute("appIconRawValue", type: .stringAttributeType, isOptional: true)
             ]
         )
     }
@@ -310,7 +330,6 @@ private extension NSPersistentCloudKitContainer.EventType {
     }
 }
 
-@MainActor
 enum MemoryStore {
     private static let memoriesKey = "memoryLove.memories"
     private static let lettersKey = "memoryLove.letters"
@@ -321,7 +340,10 @@ enum MemoryStore {
     private static let settingsID = "main"
     private static let coupleSpaceID = "main"
 
-    private static let context = PersistenceController.shared.container.viewContext
+    /// Main-thread context used for writes. Reads pass an explicit background context instead.
+    private static var context: NSManagedObjectContext {
+        PersistenceController.shared.container.viewContext
+    }
     private static var cloudKitContainer: NSPersistentCloudKitContainer {
         guard let container = PersistenceController.shared.container as? NSPersistentCloudKitContainer else {
             preconditionFailure("MemoryBox requires NSPersistentCloudKitContainer for sharing")
@@ -329,77 +351,173 @@ enum MemoryStore {
         return container
     }
 
-    static func loadMemories() -> [LoveMemory] {
-        migrateUserDefaultsIfNeeded()
-        let store = activeCoupleStore()
-        let photosByMemoryID = fetchMemoryPhotos(in: store)
-        return fetchObjects(
-            entityName: "StoredMemory",
-            sortDescriptors: [NSSortDescriptor(key: "date", ascending: false)],
-            in: store
-        )
-            .compactMap { makeMemory(from: $0, photosByMemoryID: photosByMemoryID) }
+    static func loadMemories() async -> [LoveMemory] {
+        await ensureMigrated()
+        let ctx = PersistenceController.shared.newReadContext()
+        return await ctx.perform {
+            let store = activeCoupleStore(ctx)
+            let photosByMemoryID = fetchMemoryPhotos(in: store, ctx)
+            return fetchObjects(
+                entityName: "StoredMemory",
+                sortDescriptors: [NSSortDescriptor(key: "date", ascending: false)],
+                in: store,
+                ctx
+            )
+                .compactMap { makeMemory(from: $0, photosByMemoryID: photosByMemoryID) }
+        }
     }
 
     static func save(memories: [LoveMemory]) {
         migrateUserDefaultsIfNeeded()
         let space = existingOrNewCoupleSpace()
         let targetStore = persistentStore(for: space)
-        replace(entityName: "StoredMemory", in: targetStore, shouldSave: false) { entity in
-            memories.forEach { insert($0, into: entity, space: space, store: targetStore) }
-        }
-        replace(entityName: "StoredMemoryPhoto", in: targetStore, shouldSave: false) { entity in
-            memories.forEach { insertPhotos(for: $0, into: entity, space: space, store: targetStore) }
-        }
+        upsert(memories: memories, space: space, store: targetStore)
+        upsertPhotos(for: memories, space: space, store: targetStore)
         saveContext()
     }
 
-    static func loadLetters() -> [LoveLetter] {
-        migrateUserDefaultsIfNeeded()
-        return fetchObjects(
-            entityName: "StoredLetter",
-            sortDescriptors: [NSSortDescriptor(key: "date", ascending: false)],
-            in: activeCoupleStore()
-        )
-        .compactMap(makeLetter)
-    }
-
-    static func save(letters: [LoveLetter]) {
-        migrateUserDefaultsIfNeeded()
-        let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space)
-        replace(entityName: "StoredLetter", in: targetStore) { entity in
-            letters.forEach { insert($0, into: entity, space: space, store: targetStore) }
+    static func loadLoveMessages() async -> [LoveMessage] {
+        await ensureMigrated()
+        let ctx = PersistenceController.shared.newReadContext()
+        return await ctx.perform {
+            purgeLegacyLetters(in: ctx)
+            return fetchObjects(
+                entityName: "StoredLetter",
+                sortDescriptors: [NSSortDescriptor(key: "date", ascending: true)],
+                in: activeCoupleStore(ctx),
+                ctx
+            )
+            .compactMap(makeLoveMessage)
         }
     }
 
-    static func loadSpecialDays() -> [SpecialDay] {
+    static func currentSenderRole() -> MessageSenderRole {
+        isUsingSharedCoupleSpace() ? .second : .first
+    }
+
+    static func unreadIncomingMessages(from messages: [LoveMessage]) -> [LoveMessage] {
+        let myRole = currentSenderRole()
+        return messages
+            .filter { $0.senderRole != myRole && !$0.isRead }
+            .sorted { $0.sentAt < $1.sentAt }
+    }
+
+    @discardableResult
+    static func sendLoveMessage(_ draft: LoveMessageDraft) -> LoveMessage? {
         migrateUserDefaultsIfNeeded()
-        return fetchObjects(
-            entityName: "StoredSpecialDay",
-            sortDescriptors: [NSSortDescriptor(key: "date", ascending: true)],
-            in: activeCoupleStore()
+        purgeLegacyLetters()
+
+        let trimmedMessage = draft.message.trimmed
+        guard !trimmedMessage.isEmpty || draft.imageData != nil else { return nil }
+
+        let space = existingOrNewCoupleSpace()
+        let targetStore = persistentStore(for: space)
+        let entity = entityDescription(named: "StoredLetter")
+        let object = NSManagedObject(entity: entity, insertInto: context)
+        assign(object, to: targetStore)
+
+        let message = LoveMessage(
+            message: trimmedMessage,
+            senderRole: currentSenderRole(),
+            imageData: draft.imageData,
+            mood: draft.mood,
+            replyToID: draft.replyToID
         )
-        .compactMap(makeSpecialDay)
+        object.setValue(message.id, forKey: "id")
+        apply(message, to: object, space: space)
+        saveContext()
+        return message
+    }
+
+    static func markLoveMessageRead(id: UUID) {
+        guard let object = letterObject(id: id) else { return }
+        object.setValue(true, forKey: "isRead")
+        object.setValue(Date(), forKey: "readAt")
+        saveContext()
+    }
+
+    static func setLoveMessageReaction(id: UUID, reaction: MessageReaction?) {
+        guard let object = letterObject(id: id) else { return }
+        object.setValue(reaction?.rawValue, forKey: "reactionRawValue")
+        saveContext()
+    }
+
+    static func toggleLoveMessageFavorite(id: UUID) {
+        guard let object = letterObject(id: id) else { return }
+        let current = object.value(forKey: "isFavorite") as? Bool ?? false
+        object.setValue(!current, forKey: "isFavorite")
+        saveContext()
+    }
+
+    static func updateLoveMessage(id: UUID, message: String, mood: MessageMood, imageData: Data?) {
+        guard let object = letterObject(id: id),
+              let existing = makeLoveMessage(from: object),
+              existing.senderRole == currentSenderRole()
+        else { return }
+
+        let trimmedMessage = message.trimmed
+        guard !trimmedMessage.isEmpty || imageData != nil else { return }
+
+        var updated = existing
+        updated.message = trimmedMessage
+        updated.mood = mood
+        updated.imageData = imageData
+        apply(updated, to: object, space: object.value(forKey: "space") as? NSManagedObject ?? existingOrNewCoupleSpace())
+        saveContext()
+    }
+
+    static func deleteLoveMessage(id: UUID) {
+        guard let object = letterObject(id: id),
+              let existing = makeLoveMessage(from: object),
+              existing.senderRole == currentSenderRole()
+        else { return }
+
+        context.delete(object)
+        saveContext()
+    }
+
+    static func notifyAfterRemoteImportIfNeeded() async {
+        let messages = await loadLoveMessages()
+        if !unreadIncomingMessages(from: messages).isEmpty {
+            await LoveNotificationScheduler.notifyNewLoveMessage()
+        } else {
+            await LoveNotificationScheduler.notifyRemoteCoupleUpdate()
+        }
+    }
+
+    static func loadSpecialDays() async -> [SpecialDay] {
+        await ensureMigrated()
+        let ctx = PersistenceController.shared.newReadContext()
+        return await ctx.perform {
+            fetchObjects(
+                entityName: "StoredSpecialDay",
+                sortDescriptors: [NSSortDescriptor(key: "date", ascending: true)],
+                in: activeCoupleStore(ctx),
+                ctx
+            )
+            .compactMap(makeSpecialDay)
+        }
     }
 
     static func save(specialDays: [SpecialDay]) {
         migrateUserDefaultsIfNeeded()
         let space = existingOrNewCoupleSpace()
         let targetStore = persistentStore(for: space)
-        replace(entityName: "StoredSpecialDay", in: targetStore) { entity in
-            specialDays.forEach { insert($0, into: entity, space: space, store: targetStore) }
-        }
+        upsert(specialDays: specialDays, space: space, store: targetStore)
+        saveContext()
     }
 
-    static func loadProfile() -> CoupleProfile {
-        migrateUserDefaultsIfNeeded()
-        guard let settings = settingsObject(),
-              let profile = makeProfile(from: settings)
-        else { return .empty }
+    static func loadProfile() async -> CoupleProfile {
+        await ensureMigrated()
+        let ctx = PersistenceController.shared.newReadContext()
+        return await ctx.perform {
+            guard let settings = activeSettingsObject(ctx),
+                  let profile = makeProfile(from: settings)
+            else { return .empty }
 
-        backfillProfileImageDataIfNeeded(in: settings, profile: profile)
-        return profile
+            backfillProfileImageDataIfNeeded(in: settings, profile: profile, ctx: ctx)
+            return profile
+        }
     }
 
     static func save(profile: CoupleProfile) {
@@ -410,14 +528,28 @@ enum MemoryStore {
         saveContext()
     }
 
+    static func loadAppIconChoice() -> AppIconChoice {
+        migrateUserDefaultsIfNeeded()
+        let raw = activeSettingsObject()?.value(forKey: "appIconRawValue") as? String
+        return raw.flatMap(AppIconChoice.init(rawValue:)) ?? .dragonBulliesPig
+    }
+
+    static func save(appIcon choice: AppIconChoice) {
+        migrateUserDefaultsIfNeeded()
+        let settings = existingOrNewSettings()
+        settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
+        settings.setValue(choice.rawValue, forKey: "appIconRawValue")
+        saveContext()
+    }
+
     static func loadStartDate() -> Date {
         migrateUserDefaultsIfNeeded()
-        return settingsObject()?.value(forKey: "startDate") as? Date ?? Date()
+        return activeSettingsObject()?.value(forKey: "startDate") as? Date ?? Date()
     }
 
     static func loadHasStartDate() -> Bool {
         migrateUserDefaultsIfNeeded()
-        return settingsObject()?.value(forKey: "startDateIsSet") as? Bool ?? false
+        return activeSettingsObject()?.value(forKey: "startDateIsSet") as? Bool ?? false
     }
 
     static func save(startDate: Date) {
@@ -433,9 +565,16 @@ enum MemoryStore {
     }
 
     static func prepareCoupleShare(completion: @escaping (CKShare?, CKContainer?, Error?) -> Void) {
+        let finish: (CKShare?, CKContainer?, Error?) -> Void = { share, container, error in
+            MemoryLog.share("prepareCoupleShare finish: share=\(share?.url?.absoluteString ?? "nil"), container=\(container?.containerIdentifier ?? "nil"), error=\(error?.localizedDescription ?? "nil")")
+            DispatchQueue.main.async { completion(share, container, error) }
+        }
+
+        MemoryLog.share("prepareCoupleShare: bắt đầu")
         migrateUserDefaultsIfNeeded()
         guard !isUsingSharedCoupleSpace() else {
-            completion(
+            MemoryLog.share("prepareCoupleShare: thiết bị đang dùng shared space -> chặn")
+            finish(
                 nil,
                 nil,
                 NSError(
@@ -450,41 +589,68 @@ enum MemoryStore {
         let space = existingOrNewCoupleSpace()
         backfillSpaceRelationships(space, in: persistentStore(for: space))
         saveContext()
+        MemoryLog.share("prepareCoupleShare: space objectID=\(space.objectID), isTemporary=\(space.objectID.isTemporaryID)")
 
         do {
             try context.obtainPermanentIDs(for: [space])
+            MemoryLog.share("prepareCoupleShare: obtainPermanentIDs OK, objectID=\(space.objectID)")
         } catch {
-            completion(nil, nil, error)
+            MemoryLog.share("prepareCoupleShare: obtainPermanentIDs lỗi: \(error.localizedDescription)")
+            finish(nil, nil, error)
             return
         }
 
         let persistentContainer = cloudKitContainer
+        do {
+            let existingShares = try persistentContainer.fetchShares(matching: [space.objectID])
+            if let existingShare = existingShares[space.objectID] {
+                MemoryLog.share("prepareCoupleShare: đã có share sẵn -> trả về")
+                finish(existingShare, CKContainer(identifier: PersistenceController.cloudKitContainerIdentifier), nil)
+                return
+            }
+            MemoryLog.share("prepareCoupleShare: chưa có share -> tạo mới")
+        } catch {
+            MemoryLog.share("prepareCoupleShare: fetchShares lỗi: \(error.localizedDescription)")
+            finish(nil, nil, error)
+            return
+        }
+
+        MemoryLog.share("prepareCoupleShare: gọi container.share(...)")
         persistentContainer.share([space], to: nil) { _, share, container, error in
+            MemoryLog.share("prepareCoupleShare: share() callback share=\(share != nil), container=\(container != nil), error=\(error?.localizedDescription ?? "nil")")
             guard let share, let container else {
-                completion(nil, nil, error)
+                finish(nil, nil, error)
                 return
             }
 
             share[CKShare.SystemFieldKey.title] = "MemoryBox của hai người" as CKRecordValue
-            share.publicPermission = .none
+            // Cho phép ai có link (người kia) mở và join với quyền sửa, không cần thêm sẵn Apple ID.
+            share.publicPermission = .readWrite
 
             guard let store = PersistenceController.shared.privatePersistentStore else {
-                completion(share, container, error)
+                MemoryLog.share("prepareCoupleShare: thiếu privatePersistentStore")
+                finish(share, container, error)
                 return
             }
 
             persistentContainer.persistUpdatedShare(share, in: store) { _, persistError in
-                completion(share, container, persistError ?? error)
+                MemoryLog.share("prepareCoupleShare: persistUpdatedShare error=\(persistError?.localizedDescription ?? "nil")")
+                finish(share, container, persistError ?? error)
             }
         }
     }
 
     static func acceptShareInvitation(_ metadata: CKShare.Metadata) {
-        guard let sharedStore = PersistenceController.shared.sharedPersistentStore else { return }
+        MemoryLog.share("acceptShareInvitation: nhận metadata (owner=\(metadata.ownerIdentity.userRecordID?.recordName ?? "nil"))")
+        guard let sharedStore = PersistenceController.shared.sharedPersistentStore else {
+            MemoryLog.share("acceptShareInvitation: thiếu sharedPersistentStore -> bỏ qua")
+            return
+        }
         cloudKitContainer.acceptShareInvitations(from: [metadata], into: sharedStore) { _, error in
             if let error {
-                print("MemoryBox CloudKit share accept failed: \(error.localizedDescription)")
+                MemoryLog.share("acceptShareInvitation: THẤT BẠI: \(error.localizedDescription)")
             } else {
+                MemoryLog.share("acceptShareInvitation: THÀNH CÔNG")
                 NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
             }
         }
@@ -495,13 +661,28 @@ enum MemoryStore {
         return activeCoupleStore() == sharedStore
     }
 
+    /// Call after CloudKit setup/import so reinstall restores names, start date, and content
+    /// instead of keeping empty local placeholders that raced ahead of the sync.
+    static func reconcileAfterCloudSync() {
+        purgeLegacyLetters()
+        deduplicateCoupleSpaces()
+        deduplicateSettings()
+        saveContext()
+    }
+
+    /// Migration writes on the main-thread viewContext, so hop to the main actor before reads.
+    private static func ensureMigrated() async {
+        if UserDefaults.standard.bool(forKey: didMigrateKey) { return }
+        await MainActor.run { migrateUserDefaultsIfNeeded() }
+    }
+
     private static func migrateUserDefaultsIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: didMigrateKey) else { return }
 
         let hasCoreDataContent = !fetchObjects(entityName: "StoredMemory").isEmpty
             || !fetchObjects(entityName: "StoredLetter").isEmpty
             || !fetchObjects(entityName: "StoredSpecialDay").isEmpty
-            || settingsObject() != nil
+            || anySettingsObject() != nil
 
         guard !hasCoreDataContent else {
             UserDefaults.standard.set(true, forKey: didMigrateKey)
@@ -509,65 +690,269 @@ enum MemoryStore {
         }
 
         let memories = loadFromUserDefaults([LoveMemory].self, key: memoriesKey) ?? []
-        let letters = loadFromUserDefaults([LoveLetter].self, key: lettersKey) ?? []
         let specialDays = loadFromUserDefaults([SpecialDay].self, key: specialDaysKey) ?? []
-        let profile = loadFromUserDefaults(CoupleProfile.self, key: profileKey) ?? .empty
+        let profile = loadFromUserDefaults(CoupleProfile.self, key: profileKey)
         let storedStartDateValue = UserDefaults.standard.object(forKey: startDateKey) as? Double
+
+        // On reinstall UserDefaults is empty. Do NOT create empty Core Data records here —
+        // that would export blank profile/startDate to CloudKit and wipe or conflict with
+        // the real iCloud data that is still importing.
+        let hasUserDefaultsContent = !memories.isEmpty
+            || !specialDays.isEmpty
+            || profile != nil
+            || storedStartDateValue != nil
+
+        guard hasUserDefaultsContent else {
+            UserDefaults.standard.set(true, forKey: didMigrateKey)
+            return
+        }
+
         let startDate = storedStartDateValue.map(Date.init(timeIntervalSince1970:)) ?? Date()
         let space = existingOrNewCoupleSpace()
         let targetStore = persistentStore(for: space)
 
-        replace(entityName: "StoredMemory", in: targetStore, shouldSave: false) { object in
-            memories.forEach { insert($0, into: object, space: space, store: targetStore) }
-        }
-        replace(entityName: "StoredMemoryPhoto", in: targetStore, shouldSave: false) { object in
-            memories.forEach { insertPhotos(for: $0, into: object, space: space, store: targetStore) }
-        }
-        replace(entityName: "StoredLetter", in: targetStore, shouldSave: false) { object in
-            letters.forEach { insert($0, into: object, space: space, store: targetStore) }
-        }
-        replace(entityName: "StoredSpecialDay", in: targetStore, shouldSave: false) { object in
-            specialDays.forEach { insert($0, into: object, space: space, store: targetStore) }
-        }
+        upsert(memories: memories, space: space, store: targetStore)
+        upsertPhotos(for: memories, space: space, store: targetStore)
+        upsert(specialDays: specialDays, space: space, store: targetStore)
         let settings = existingOrNewSettings()
         settings.setValue(space, forKey: "space")
-        update(settings: settings, profile: profile, startDate: startDate, startDateIsSet: storedStartDateValue != nil)
+        update(
+            settings: settings,
+            profile: profile ?? .empty,
+            startDate: startDate,
+            startDateIsSet: storedStartDateValue != nil
+        )
         saveContext()
 
         UserDefaults.standard.set(true, forKey: didMigrateKey)
     }
 
+    private static func deduplicateCoupleSpaces() {
+        let spaces = fetchObjects(
+            entityName: "CoupleSpace",
+            predicate: NSPredicate(format: "id == %@", coupleSpaceID)
+        )
+        guard spaces.count > 1 else { return }
+
+        let keeper = spaces.max(by: { spaceContentScore($0) < spaceContentScore($1) }) ?? spaces[0]
+        for space in spaces where space.objectID != keeper.objectID {
+            if samePersistentStore(space, keeper) {
+                reassignChildren(from: space, to: keeper)
+                context.delete(space)
+            } else if spaceContentScore(space) == 0 {
+                context.delete(space)
+            }
+        }
+    }
+
+    private static func samePersistentStore(_ lhs: NSManagedObject, _ rhs: NSManagedObject) -> Bool {
+        let left = lhs.objectID.persistentStore
+        let right = rhs.objectID.persistentStore
+        return left == nil || right == nil || left == right
+    }
+
+    private static func deduplicateSettings() {
+        let allSettings = fetchObjects(
+            entityName: "AppSettings",
+            predicate: NSPredicate(format: "id == %@", settingsID)
+        )
+        guard allSettings.count > 1 else { return }
+
+        let keeper = allSettings.max(by: { settingsContentScore($0) < settingsContentScore($1) }) ?? allSettings[0]
+        for settings in allSettings where settings.objectID != keeper.objectID {
+            context.delete(settings)
+        }
+
+        if keeper.value(forKey: "space") == nil {
+            keeper.setValue(coupleSpaceObject(), forKey: "space")
+        }
+    }
+
+    private static func spaceContentScore(_ space: NSManagedObject) -> Int {
+        let relatedCounts = ["memories", "memoryPhotos", "letters", "specialDays", "settings"]
+            .compactMap { space.value(forKey: $0) as? NSSet }
+            .map(\.count)
+        let relatedScore = relatedCounts.reduce(0, +) * 10
+        let ageBonus: Int = {
+            guard let createdAt = space.value(forKey: "createdAt") as? Date else { return 0 }
+            return max(0, Int(-createdAt.timeIntervalSinceNow / 60))
+        }()
+        return relatedScore + ageBonus
+    }
+
+    private static func settingsContentScore(_ settings: NSManagedObject) -> Int {
+        var score = 0
+        if settings.value(forKey: "startDateIsSet") as? Bool == true { score += 100 }
+        if let name = settings.value(forKey: "firstName") as? String, !name.trimmed.isEmpty { score += 40 }
+        if let name = settings.value(forKey: "secondName") as? String, !name.trimmed.isEmpty { score += 40 }
+        if settings.value(forKey: "firstImageData") != nil { score += 20 }
+        if settings.value(forKey: "secondImageData") != nil { score += 20 }
+        if settings.value(forKey: "startDate") != nil { score += 10 }
+        return score
+    }
+
+    private static func reassignChildren(from oldSpace: NSManagedObject, to newSpace: NSManagedObject) {
+        ["memories", "memoryPhotos", "letters", "specialDays", "settings"].forEach { key in
+            guard let children = (oldSpace.value(forKey: key) as? NSSet)?.allObjects as? [NSManagedObject] else { return }
+            children.forEach { $0.setValue(newSpace, forKey: "space") }
+        }
+    }
+
+    private static func fetchObjects(
+        entityName: String,
+        predicate: NSPredicate,
+        sortDescriptors: [NSSortDescriptor] = [],
+        in store: NSPersistentStore? = nil,
+        _ ctx: NSManagedObjectContext = context
+    ) -> [NSManagedObject] {
+        let request = NSFetchRequest<NSManagedObject>(entityName: entityName)
+        request.predicate = predicate
+        request.sortDescriptors = sortDescriptors
+        if let store {
+            request.affectedStores = [store]
+        }
+        return (try? ctx.fetch(request)) ?? []
+    }
+
     private static func fetchObjects(
         entityName: String,
         sortDescriptors: [NSSortDescriptor] = [],
-        in store: NSPersistentStore? = nil
+        in store: NSPersistentStore? = nil,
+        _ ctx: NSManagedObjectContext = context
     ) -> [NSManagedObject] {
         let request = NSFetchRequest<NSManagedObject>(entityName: entityName)
         request.sortDescriptors = sortDescriptors
         if let store {
             request.affectedStores = [store]
         }
-        return (try? context.fetch(request)) ?? []
+        return (try? ctx.fetch(request)) ?? []
     }
 
-    private static func replace(
-        entityName: String,
-        in store: NSPersistentStore? = nil,
-        shouldSave: Bool = true,
-        insertObjects: (NSEntityDescription) -> Void
-    ) {
-        fetchObjects(entityName: entityName, in: store).forEach(context.delete)
-        insertObjects(entityDescription(named: entityName))
+    private static func upsert(memories: [LoveMemory], space: NSManagedObject, store: NSPersistentStore?) {
+        var existingByID = objectsByUUID(entityName: "StoredMemory", in: store)
+        let entity = entityDescription(named: "StoredMemory")
 
-        if shouldSave {
-            saveContext()
+        for memory in memories {
+            let object = existingByID.removeValue(forKey: memory.id) ?? {
+                let created = NSManagedObject(entity: entity, insertInto: context)
+                assign(created, to: store)
+                created.setValue(memory.id, forKey: "id")
+                return created
+            }()
+            apply(memory, to: object, space: space)
+        }
+
+        existingByID.values.forEach(context.delete)
+    }
+
+    private static func upsertPhotos(for memories: [LoveMemory], space: NSManagedObject, store: NSPersistentStore?) {
+        let existingPhotos = fetchObjects(entityName: "StoredMemoryPhoto", in: store)
+        var photosByKey: [PhotoKey: NSManagedObject] = [:]
+        for photo in existingPhotos {
+            guard
+                let memoryID = photo.value(forKey: "memoryID") as? UUID,
+                let relativePath = photo.value(forKey: "relativePath") as? String
+            else {
+                context.delete(photo)
+                continue
+            }
+            let key = PhotoKey(memoryID: memoryID, relativePath: relativePath)
+            if let duplicate = photosByKey[key] {
+                if duplicate.value(forKey: "imageData") == nil, photo.value(forKey: "imageData") != nil {
+                    context.delete(duplicate)
+                    photosByKey[key] = photo
+                } else {
+                    context.delete(photo)
+                }
+            } else {
+                photosByKey[key] = photo
+            }
+        }
+
+        let entity = entityDescription(named: "StoredMemoryPhoto")
+
+        for memory in memories {
+            for (index, imagePath) in memory.imagePaths.enumerated() {
+                let key = PhotoKey(memoryID: memory.id, relativePath: imagePath)
+
+                if let existing = photosByKey.removeValue(forKey: key) {
+                    existing.setValue(Int64(index), forKey: "sortIndex")
+                    existing.setValue(space, forKey: "space")
+                    if existing.value(forKey: "imageData") == nil {
+                        existing.setValue(ImageFileStore.data(for: imagePath), forKey: "imageData")
+                    }
+                } else {
+                    let object = NSManagedObject(entity: entity, insertInto: context)
+                    assign(object, to: store)
+                    object.setValue(UUID(), forKey: "id")
+                    object.setValue(memory.id, forKey: "memoryID")
+                    object.setValue(imagePath, forKey: "relativePath")
+                    object.setValue(Int64(index), forKey: "sortIndex")
+                    object.setValue(ImageFileStore.data(for: imagePath), forKey: "imageData")
+                    object.setValue(space, forKey: "space")
+                }
+            }
+        }
+
+        photosByKey.values.forEach(context.delete)
+    }
+
+    private static func purgeLegacyLetters(in ctx: NSManagedObjectContext = context) {
+        let objects = fetchObjects(entityName: "StoredLetter", in: nil, ctx)
+        var didDelete = false
+        for object in objects {
+            let version = object.value(forKey: "schemaVersion") as? Int64 ?? 0
+            if version < Int64(LoveMessage.currentSchemaVersion) {
+                ctx.delete(object)
+                didDelete = true
+            }
+        }
+        if didDelete, ctx.hasChanges {
+            try? ctx.save()
         }
     }
 
-    private static func insert(_ memory: LoveMemory, into entity: NSEntityDescription, space: NSManagedObject, store: NSPersistentStore?) {
-        let object = NSManagedObject(entity: entity, insertInto: context)
-        assign(object, to: store)
-        object.setValue(memory.id, forKey: "id")
+    private static func letterObject(id: UUID) -> NSManagedObject? {
+        fetchObjects(
+            entityName: "StoredLetter",
+            predicate: NSPredicate(format: "id == %@", id as CVarArg),
+            in: activeCoupleStore()
+        ).first
+    }
+
+    private static func upsert(specialDays: [SpecialDay], space: NSManagedObject, store: NSPersistentStore?) {
+        var existingByID = objectsByUUID(entityName: "StoredSpecialDay", in: store)
+        let entity = entityDescription(named: "StoredSpecialDay")
+
+        for day in specialDays {
+            let object = existingByID.removeValue(forKey: day.id) ?? {
+                let created = NSManagedObject(entity: entity, insertInto: context)
+                assign(created, to: store)
+                created.setValue(day.id, forKey: "id")
+                return created
+            }()
+            apply(day, to: object, space: space)
+        }
+
+        existingByID.values.forEach(context.delete)
+    }
+
+    private static func objectsByUUID(entityName: String, in store: NSPersistentStore?) -> [UUID: NSManagedObject] {
+        var result: [UUID: NSManagedObject] = [:]
+        for object in fetchObjects(entityName: entityName, in: store) {
+            guard let id = object.value(forKey: "id") as? UUID else {
+                context.delete(object)
+                continue
+            }
+            if let duplicate = result[id] {
+                context.delete(duplicate)
+            }
+            result[id] = object
+        }
+        return result
+    }
+
+    private static func apply(_ memory: LoveMemory, to object: NSManagedObject, space: NSManagedObject) {
         object.setValue(memory.title, forKey: "title")
         object.setValue(memory.date, forKey: "date")
         object.setValue(memory.place, forKey: "place")
@@ -582,37 +967,32 @@ enum MemoryStore {
         object.setValue(space, forKey: "space")
     }
 
-    private static func insertPhotos(for memory: LoveMemory, into entity: NSEntityDescription, space: NSManagedObject, store: NSPersistentStore?) {
-        for (index, imagePath) in memory.imagePaths.enumerated() {
-            let object = NSManagedObject(entity: entity, insertInto: context)
-            assign(object, to: store)
-            object.setValue(UUID(), forKey: "id")
-            object.setValue(memory.id, forKey: "memoryID")
-            object.setValue(imagePath, forKey: "relativePath")
-            object.setValue(Int64(index), forKey: "sortIndex")
-            object.setValue(ImageFileStore.data(for: imagePath), forKey: "imageData")
-            object.setValue(space, forKey: "space")
-        }
-    }
-
-    private static func insert(_ letter: LoveLetter, into entity: NSEntityDescription, space: NSManagedObject, store: NSPersistentStore?) {
-        let object = NSManagedObject(entity: entity, insertInto: context)
-        assign(object, to: store)
-        object.setValue(letter.id, forKey: "id")
-        object.setValue(letter.title, forKey: "title")
-        object.setValue(letter.message, forKey: "message")
-        object.setValue(letter.date, forKey: "date")
+    private static func apply(_ message: LoveMessage, to object: NSManagedObject, space: NSManagedObject) {
+        object.setValue(nil, forKey: "title")
+        object.setValue(message.message, forKey: "message")
+        object.setValue(message.sentAt, forKey: "date")
+        object.setValue(message.senderRole.rawValue, forKey: "senderRoleRawValue")
+        object.setValue(message.imageData, forKey: "imageData")
+        object.setValue(message.mood.rawValue, forKey: "moodRawValue")
+        object.setValue(message.reaction?.rawValue, forKey: "reactionRawValue")
+        object.setValue(message.replyToID, forKey: "replyToID")
+        object.setValue(message.isRead, forKey: "isRead")
+        object.setValue(message.readAt, forKey: "readAt")
+        object.setValue(message.isFavorite, forKey: "isFavorite")
+        object.setValue(Int64(message.schemaVersion), forKey: "schemaVersion")
         object.setValue(space, forKey: "space")
     }
 
-    private static func insert(_ day: SpecialDay, into entity: NSEntityDescription, space: NSManagedObject, store: NSPersistentStore?) {
-        let object = NSManagedObject(entity: entity, insertInto: context)
-        assign(object, to: store)
-        object.setValue(day.id, forKey: "id")
+    private static func apply(_ day: SpecialDay, to object: NSManagedObject, space: NSManagedObject) {
         object.setValue(day.title, forKey: "title")
         object.setValue(day.date, forKey: "date")
         object.setValue(day.symbolName, forKey: "symbolName")
         object.setValue(space, forKey: "space")
+    }
+
+    private struct PhotoKey: Hashable {
+        let memoryID: UUID
+        let relativePath: String
     }
 
     private static func makeMemory(from object: NSManagedObject, photosByMemoryID: [UUID: [String]]) -> LoveMemory? {
@@ -651,7 +1031,7 @@ enum MemoryStore {
         )
     }
 
-    private static func fetchMemoryPhotos(in store: NSPersistentStore?) -> [UUID: [String]] {
+    private static func fetchMemoryPhotos(in store: NSPersistentStore?, _ ctx: NSManagedObjectContext = context) -> [UUID: [String]] {
         let request = NSFetchRequest<NSManagedObject>(entityName: "StoredMemoryPhoto")
         request.sortDescriptors = [
             NSSortDescriptor(key: "memoryID", ascending: true),
@@ -661,7 +1041,7 @@ enum MemoryStore {
             request.affectedStores = [store]
         }
 
-        let objects = (try? context.fetch(request)) ?? []
+        let objects = (try? ctx.fetch(request)) ?? []
         var pathsByMemoryID: [UUID: [String]] = [:]
 
         for object in objects {
@@ -679,15 +1059,38 @@ enum MemoryStore {
         return pathsByMemoryID.mapValues { $0.uniqued() }
     }
 
-    private static func makeLetter(from object: NSManagedObject) -> LoveLetter? {
+    private static func makeLoveMessage(from object: NSManagedObject) -> LoveMessage? {
+        let schemaVersion = Int(object.value(forKey: "schemaVersion") as? Int64 ?? 0)
+        guard schemaVersion >= LoveMessage.currentSchemaVersion else { return nil }
+
         guard
             let id = object.value(forKey: "id") as? UUID,
-            let title = object.value(forKey: "title") as? String,
             let message = object.value(forKey: "message") as? String,
-            let date = object.value(forKey: "date") as? Date
+            let sentAt = object.value(forKey: "date") as? Date,
+            let senderRoleRawValue = object.value(forKey: "senderRoleRawValue") as? String,
+            let senderRole = MessageSenderRole(rawValue: senderRoleRawValue),
+            let moodRawValue = object.value(forKey: "moodRawValue") as? String,
+            let mood = MessageMood(rawValue: moodRawValue)
         else { return nil }
 
-        return LoveLetter(id: id, title: title, message: message, date: date)
+        let reaction = (object.value(forKey: "reactionRawValue") as? String).flatMap(MessageReaction.init(rawValue:))
+        let isRead = object.value(forKey: "isRead") as? Bool ?? false
+        let isFavorite = object.value(forKey: "isFavorite") as? Bool ?? false
+
+        return LoveMessage(
+            id: id,
+            message: message,
+            sentAt: sentAt,
+            senderRole: senderRole,
+            imageData: object.value(forKey: "imageData") as? Data,
+            mood: mood,
+            reaction: reaction,
+            replyToID: object.value(forKey: "replyToID") as? UUID,
+            isRead: isRead,
+            readAt: object.value(forKey: "readAt") as? Date,
+            isFavorite: isFavorite,
+            schemaVersion: schemaVersion
+        )
     }
 
     private static func makeSpecialDay(from object: NSManagedObject) -> SpecialDay? {
@@ -739,7 +1142,7 @@ enum MemoryStore {
         return ImageFileStore.save(data: data, category: "profiles", id: id)
     }
 
-    private static func backfillProfileImageDataIfNeeded(in settings: NSManagedObject, profile: CoupleProfile) {
+    private static func backfillProfileImageDataIfNeeded(in settings: NSManagedObject, profile: CoupleProfile, ctx: NSManagedObjectContext = context) {
         var didUpdate = false
 
         if settings.value(forKey: "firstImageData") == nil,
@@ -754,8 +1157,8 @@ enum MemoryStore {
             didUpdate = true
         }
 
-        if didUpdate {
-            saveContext()
+        if didUpdate, ctx.hasChanges {
+            try? ctx.save()
         }
     }
 
@@ -766,15 +1169,42 @@ enum MemoryStore {
         settings.setValue(profile.firstName, forKey: "firstName")
         settings.setValue(profile.firstAvatar, forKey: "firstAvatar")
         settings.setValue(profile.firstColor.rawValue, forKey: "firstColorRawValue")
-        settings.setValue(profile.firstImagePath, forKey: "firstImagePath")
         settings.setValue(profile.firstAvatarSize, forKey: "firstAvatarSize")
-        settings.setValue(ImageFileStore.data(for: profile.firstImagePath), forKey: "firstImageData")
+        syncProfileImage(
+            settings: settings,
+            pathKey: "firstImagePath",
+            dataKey: "firstImageData",
+            newPath: profile.firstImagePath
+        )
         settings.setValue(profile.secondName, forKey: "secondName")
         settings.setValue(profile.secondAvatar, forKey: "secondAvatar")
         settings.setValue(profile.secondColor.rawValue, forKey: "secondColorRawValue")
-        settings.setValue(profile.secondImagePath, forKey: "secondImagePath")
         settings.setValue(profile.secondAvatarSize, forKey: "secondAvatarSize")
-        settings.setValue(ImageFileStore.data(for: profile.secondImagePath), forKey: "secondImageData")
+        syncProfileImage(
+            settings: settings,
+            pathKey: "secondImagePath",
+            dataKey: "secondImageData",
+            newPath: profile.secondImagePath
+        )
+    }
+
+    private static func syncProfileImage(
+        settings: NSManagedObject,
+        pathKey: String,
+        dataKey: String,
+        newPath: String?
+    ) {
+        let oldPath = settings.value(forKey: pathKey) as? String
+        settings.setValue(newPath, forKey: pathKey)
+
+        if oldPath != newPath {
+            ImageFileStore.delete(oldPath)
+            settings.setValue(ImageFileStore.data(for: newPath), forKey: dataKey)
+        } else if newPath != nil, settings.value(forKey: dataKey) == nil {
+            settings.setValue(ImageFileStore.data(for: newPath), forKey: dataKey)
+        } else if newPath == nil {
+            settings.setValue(nil, forKey: dataKey)
+        }
     }
 
     private static func existingOrNewCoupleSpace() -> NSManagedObject {
@@ -789,12 +1219,15 @@ enum MemoryStore {
         return space
     }
 
-    private static func coupleSpaceObject() -> NSManagedObject? {
-        firstObject(
+    private static func coupleSpaceObject(_ ctx: NSManagedObjectContext = context) -> NSManagedObject? {
+        let spaces = fetchObjects(
             entityName: "CoupleSpace",
             predicate: NSPredicate(format: "id == %@", coupleSpaceID),
-            preferSharedStore: true
+            ctx
         )
+        guard !spaces.isEmpty else { return nil }
+        if spaces.count == 1 { return spaces[0] }
+        return spaces.max(by: { spaceContentScore($0) < spaceContentScore($1) })
     }
 
     private static func backfillSpaceRelationships(_ space: NSManagedObject, in store: NSPersistentStore?) {
@@ -805,48 +1238,62 @@ enum MemoryStore {
     }
 
     private static func currentStartDate() -> Date {
-        settingsObject()?.value(forKey: "startDate") as? Date ?? Date()
+        activeSettingsObject()?.value(forKey: "startDate") as? Date ?? Date()
     }
 
     private static func existingOrNewSettings() -> NSManagedObject {
-        if let settings = settingsObject() {
+        if let settings = activeSettingsObject() {
+            return settings
+        }
+
+        let space = existingOrNewCoupleSpace()
+        let targetStore = persistentStore(for: space)
+        if let settings = fetchFirstObject(
+            entityName: "AppSettings",
+            predicate: NSPredicate(format: "id == %@", settingsID),
+            in: targetStore
+        ) {
             return settings
         }
 
         let settings = NSManagedObject(entity: entityDescription(named: "AppSettings"), insertInto: context)
-        let space = existingOrNewCoupleSpace()
-        assign(settings, to: persistentStore(for: space))
+        assign(settings, to: targetStore)
         settings.setValue(space, forKey: "space")
         return settings
     }
 
-    private static func settingsObject() -> NSManagedObject? {
-        firstObject(
+    private static func activeSettingsObject(_ ctx: NSManagedObjectContext = context) -> NSManagedObject? {
+        let inActiveStore = fetchObjects(
             entityName: "AppSettings",
             predicate: NSPredicate(format: "id == %@", settingsID),
-            preferSharedStore: true
+            in: activeCoupleStore(ctx),
+            ctx
         )
-    }
-
-    private static func firstObject(
-        entityName: String,
-        predicate: NSPredicate,
-        preferSharedStore: Bool
-    ) -> NSManagedObject? {
-        let stores = preferredStores(preferSharedStore: preferSharedStore)
-        for store in stores {
-            if let object = fetchFirstObject(entityName: entityName, predicate: predicate, in: store) {
-                return object
-            }
+        if let best = inActiveStore.max(by: { settingsContentScore($0) < settingsContentScore($1) }) {
+            return best
         }
 
-        return fetchFirstObject(entityName: entityName, predicate: predicate, in: nil)
+        let all = fetchObjects(
+            entityName: "AppSettings",
+            predicate: NSPredicate(format: "id == %@", settingsID),
+            ctx
+        )
+        return all.max(by: { settingsContentScore($0) < settingsContentScore($1) })
+    }
+
+    private static func anySettingsObject() -> NSManagedObject? {
+        let all = fetchObjects(
+            entityName: "AppSettings",
+            predicate: NSPredicate(format: "id == %@", settingsID)
+        )
+        return all.max(by: { settingsContentScore($0) < settingsContentScore($1) })
     }
 
     private static func fetchFirstObject(
         entityName: String,
         predicate: NSPredicate,
-        in store: NSPersistentStore?
+        in store: NSPersistentStore?,
+        _ ctx: NSManagedObjectContext = context
     ) -> NSManagedObject? {
         let request = NSFetchRequest<NSManagedObject>(entityName: entityName)
         request.fetchLimit = 1
@@ -854,28 +1301,21 @@ enum MemoryStore {
         if let store {
             request.affectedStores = [store]
         }
-        return try? context.fetch(request).first
+        return try? ctx.fetch(request).first
     }
 
-    private static func preferredStores(preferSharedStore: Bool) -> [NSPersistentStore] {
-        let persistence = PersistenceController.shared
-        let preferred = preferSharedStore
-            ? [persistence.sharedPersistentStore, persistence.privatePersistentStore]
-            : [persistence.privatePersistentStore, persistence.sharedPersistentStore]
-        return preferred.compactMap { $0 }
-    }
-
-    private static func activeCoupleStore() -> NSPersistentStore? {
+    private static func activeCoupleStore(_ ctx: NSManagedObjectContext = context) -> NSPersistentStore? {
         if let sharedStore = PersistenceController.shared.sharedPersistentStore,
            fetchFirstObject(
                 entityName: "CoupleSpace",
                 predicate: NSPredicate(format: "id == %@", coupleSpaceID),
-                in: sharedStore
+                in: sharedStore,
+                ctx
            ) != nil {
             return sharedStore
         }
 
-        return coupleSpaceObject().flatMap(persistentStore(for:))
+        return coupleSpaceObject(ctx).flatMap(persistentStore(for:))
     }
 
     private static func entityDescription(named name: String) -> NSEntityDescription {

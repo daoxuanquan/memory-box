@@ -212,6 +212,13 @@ enum ImageFileStore {
         return try? Data(contentsOf: fileURL(for: relativePath))
     }
 
+    static func delete(_ relativePath: String?) {
+        guard let relativePath else { return }
+        let fileURL = fileURL(for: relativePath)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     static func restoreIfNeeded(data: Data, relativePath: String) {
         let fileURL = fileURL(for: relativePath)
         guard !FileManager.default.fileExists(atPath: fileURL.path) else { return }
@@ -240,7 +247,32 @@ enum ImageFileStore {
     private static var applicationSupportDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     }
+
+    static func compressedJPEGData(from data: Data, maxDimension: CGFloat = 1280, quality: CGFloat = 0.78) -> Data? {
+        #if canImport(UIKit)
+        guard let image = UIImage(data: data) else { return data }
+        return image.compressedJPEGData(maxDimension: maxDimension, quality: quality) ?? data
+        #else
+        return data
+        #endif
+    }
 }
+
+#if canImport(UIKit)
+extension UIImage {
+    func compressedJPEGData(maxDimension: CGFloat = 1280, quality: CGFloat = 0.78) -> Data? {
+        let largestSide = max(size.width, size.height)
+        let scale = largestSide > maxDimension ? maxDimension / largestSide : 1
+        let targetSize = CGSize(width: size.width * scale, height: size.height * scale)
+
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let resized = renderer.image { _ in
+            draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return resized.jpegData(compressionQuality: quality)
+    }
+}
+#endif
 
 enum ImageLoader {
     static func data(from item: PhotosPickerItem?) async -> Data? {

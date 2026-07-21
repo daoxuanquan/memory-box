@@ -8,13 +8,18 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var selectedTab: AppTab = .home
-    @State private var memories: [LoveMemory] = MemoryStore.loadMemories()
-    @State private var letters: [LoveLetter] = MemoryStore.loadLetters()
-    @State private var specialDays: [SpecialDay] = MemoryStore.loadSpecialDays()
-    @State private var profile = MemoryStore.loadProfile()
+    @State private var memories: [LoveMemory] = []
+    @State private var messages: [LoveMessage] = []
+    @State private var specialDays: [SpecialDay] = []
+    @State private var profile: CoupleProfile = .empty
     @State private var relationshipStart = MemoryStore.loadStartDate()
     @State private var hasRelationshipStart = MemoryStore.loadHasStartDate()
     @State private var activeSheet: ActiveSheet?
+    @State private var arrivalQueue: [LoveMessage] = []
+    @State private var presentedArrivalMessage: LoveMessage?
+    @State private var acknowledgedArrivalIDs: Set<UUID> = []
+    @State private var didPresentDebugArrival = false
+    @State private var debugArrivalID: UUID?
 
     private var daysTogether: Int {
         guard hasRelationshipStart else { return 0 }
@@ -26,17 +31,37 @@ struct ContentView: View {
     }
 
     private var hasUserContent: Bool {
-        !memories.isEmpty || !letters.isEmpty || !specialDays.isEmpty
+        !memories.isEmpty || !messages.isEmpty || !specialDays.isEmpty
     }
 
     private var recentMemories: [LoveMemory] {
         memories.sorted { $0.date > $1.date }
     }
 
+    private var unreadIncomingCount: Int {
+        MemoryStore.unreadIncomingMessages(from: messages).count
+    }
+
     var body: some View {
         tabContent
             .tint(.pink)
             .sheet(item: $activeSheet, content: sheetContent)
+            .overlay {
+                if let presentedArrivalMessage {
+                    LoveMessageArrivalView(
+                        message: presentedArrivalMessage,
+                        profile: profile,
+                        onOpenConversation: { selectedTab = .letters },
+                        onHide: { hideArrival(presentedArrivalMessage) },
+                        onAcknowledge: { acknowledgeArrival(presentedArrivalMessage) }
+                    )
+                    .transition(.opacity)
+                    .zIndex(10)
+                }
+            }
+            .task {
+                await reloadFromStore()
+            }
             .task {
                 await LoveNotificationScheduler.refresh(
                     specialDays: specialDays,
@@ -91,9 +116,17 @@ struct ContentView: View {
     }
 
     private var lettersTab: some View {
-        LettersView(letters: $letters, onAddLetter: showAddLetter, onChange: saveLetters, onUpdate: updateLetter)
-            .tabItem { Label("Thư", systemImage: "envelope.fill") }
-            .tag(AppTab.letters)
+        LettersView(
+            messages: $messages,
+            profile: profile,
+            onCompose: {},
+            onReload: { Task { await reloadMessages() } }
+        )
+        .tabItem {
+            Label("Tin nhắn", systemImage: "heart.text.square.fill")
+        }
+        .badge(unreadIncomingCount)
+        .tag(AppTab.letters)
     }
 
     private var daysTab: some View {
@@ -121,8 +154,6 @@ struct ContentView: View {
         switch sheet {
         case .memory:
             MemoryEditorView(mode: .add, onSave: saveMemory)
-        case .letter:
-            LetterEditorView(mode: .add, onSave: saveLetter)
         case .specialDay:
             SpecialDayEditorView(mode: .add, onSave: saveSpecialDay)
         case .profile(let person):
@@ -134,10 +165,6 @@ struct ContentView: View {
 
     private func showAddMemory() {
         activeSheet = .memory
-    }
-
-    private func showAddLetter() {
-        activeSheet = .letter
     }
 
     private func showAddSpecialDay() {
@@ -167,34 +194,19 @@ struct ContentView: View {
     private func saveMemory(_ memory: LoveMemory) {
         memories.insert(memory, at: 0)
         MemoryStore.save(memories: memories)
-        memories = MemoryStore.loadMemories()
+        Task { memories = await MemoryStore.loadMemories() }
     }
 
     private func saveMemories() {
         MemoryStore.save(memories: memories)
-        memories = MemoryStore.loadMemories()
+        Task { memories = await MemoryStore.loadMemories() }
     }
 
     private func updateMemory(_ memory: LoveMemory) {
         guard let index = memories.firstIndex(where: { $0.id == memory.id }) else { return }
         memories[index] = memory
         MemoryStore.save(memories: memories)
-        memories = MemoryStore.loadMemories()
-    }
-
-    private func saveLetter(_ letter: LoveLetter) {
-        letters.insert(letter, at: 0)
-        MemoryStore.save(letters: letters)
-    }
-
-    private func saveLetters() {
-        MemoryStore.save(letters: letters)
-    }
-
-    private func updateLetter(_ letter: LoveLetter) {
-        guard let index = letters.firstIndex(where: { $0.id == letter.id }) else { return }
-        letters[index] = letter
-        MemoryStore.save(letters: letters)
+        Task { memories = await MemoryStore.loadMemories() }
     }
 
     private func saveSpecialDay(_ day: SpecialDay) {
@@ -234,32 +246,123 @@ struct ContentView: View {
         }
     }
 
-    private func reloadFromStore() {
-        memories = MemoryStore.loadMemories()
-        letters = MemoryStore.loadLetters()
-        specialDays = MemoryStore.loadSpecialDays()
-        profile = MemoryStore.loadProfile()
+    private func reloadFromStore() async {
+        async let loadedMemories = MemoryStore.loadMemories()
+        async let loadedMessages = MemoryStore.loadLoveMessages()
+        async let loadedSpecialDays = MemoryStore.loadSpecialDays()
+        async let loadedProfile = MemoryStore.loadProfile()
+
+        memories = await loadedMemories
+        messages = await loadedMessages
+        specialDays = await loadedSpecialDays
+        profile = await loadedProfile
         relationshipStart = MemoryStore.loadStartDate()
         hasRelationshipStart = MemoryStore.loadHasStartDate()
+        AppIconManager.setIcon(MemoryStore.loadAppIconChoice())
         refreshNotificationSchedule()
+        presentDebugArrivalIfNeeded()
+        refreshArrivalQueue()
+    }
+
+    private func presentDebugArrivalIfNeeded() {
+        #if DEBUG
+        guard !didPresentDebugArrival else { return }
+        didPresentDebugArrival = true
+
+        let myRole = MemoryStore.currentSenderRole()
+        let senderRole: MessageSenderRole = myRole == .first ? .second : .first
+        let fake = LoveMessage(
+            message: "Hôm nay dù có thế nào thì em vẫn muốn nói rằng em rất thương anh. Cảm ơn anh vì luôn ở đây cùng em nhé!",
+            senderRole: senderRole,
+            mood: .sweet
+        )
+        debugArrivalID = fake.id
+        presentedArrivalMessage = fake
+        #endif
+    }
+
+    private func reloadMessages() async {
+        messages = await MemoryStore.loadLoveMessages()
+        refreshArrivalQueue()
+    }
+
+    private func refreshArrivalQueue() {
+        // Không đụng tới popup tin giả (Debug) để còn test UI.
+        if let debugArrivalID, presentedArrivalMessage?.id == debugArrivalID {
+            return
+        }
+
+        let unread = MemoryStore.unreadIncomingMessages(from: messages)
+        let pending = unread.filter { !acknowledgedArrivalIDs.contains($0.id) }
+        arrivalQueue = pending
+
+        if presentedArrivalMessage == nil {
+            presentedArrivalMessage = arrivalQueue.first
+        } else if let current = presentedArrivalMessage,
+                  !pending.contains(where: { $0.id == current.id }) {
+            presentedArrivalMessage = arrivalQueue.first
+        }
+    }
+
+    private func hideArrival(_ message: LoveMessage) {
+        // Ẩn trong phiên hiện tại, vẫn giữ chưa đọc để badge còn hiện.
+        acknowledgedArrivalIDs.insert(message.id)
+        if message.id == debugArrivalID {
+            debugArrivalID = nil
+        }
+        withAnimation(.easeOut(duration: 0.2)) {
+            presentedArrivalMessage = nil
+        }
+
+        if let next = arrivalQueue.first(where: { !acknowledgedArrivalIDs.contains($0.id) }) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
+                    presentedArrivalMessage = next
+                }
+            }
+        }
+    }
+
+    private func acknowledgeArrival(_ message: LoveMessage) {
+        if message.id == debugArrivalID {
+            debugArrivalID = nil
+            withAnimation(.easeOut(duration: 0.2)) {
+                presentedArrivalMessage = nil
+            }
+            return
+        }
+
+        MemoryStore.markLoveMessageRead(id: message.id)
+        acknowledgedArrivalIDs.insert(message.id)
+        presentedArrivalMessage = nil
+
+        Task {
+            messages = await MemoryStore.loadLoveMessages()
+            if let next = MemoryStore.unreadIncomingMessages(from: messages)
+                .first(where: { !acknowledgedArrivalIDs.contains($0.id) }) {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
+                    presentedArrivalMessage = next
+                }
+            }
+        }
     }
 
     private func listenForRemoteStoreChanges() async {
         for await _ in NotificationCenter.default.notifications(named: .NSPersistentStoreRemoteChange) {
-            reloadFromStore()
+            MemoryStore.reconcileAfterCloudSync()
+            await reloadFromStore()
         }
     }
 
     private func listenForMemoryStoreChanges() async {
         for await _ in NotificationCenter.default.notifications(named: .memoryStoreDidChange) {
-            reloadFromStore()
+            await reloadFromStore()
         }
     }
 }
 
 enum ActiveSheet: Identifiable {
     case memory
-    case letter
     case specialDay
     case profile(ProfilePerson)
     case settings
@@ -268,8 +371,6 @@ enum ActiveSheet: Identifiable {
         switch self {
         case .memory:
             return "memory"
-        case .letter:
-            return "letter"
         case .specialDay:
             return "specialDay"
         case .profile(let person):
@@ -291,6 +392,14 @@ enum ProfilePerson: String {
         case .second:
             return "Người thứ hai"
         }
+    }
+
+    var senderRole: MessageSenderRole {
+        self == .first ? .first : .second
+    }
+
+    var counterpart: ProfilePerson {
+        self == .first ? .second : .first
     }
 }
 

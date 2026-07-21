@@ -284,83 +284,6 @@ struct MemoryEditorView: View {
     }
 }
 
-enum LetterEditorMode {
-    case add
-    case edit(LoveLetter)
-
-    var title: String {
-        switch self {
-        case .add:
-            return "Viết thư"
-        case .edit:
-            return "Sửa thư"
-        }
-    }
-
-    var existingLetter: LoveLetter? {
-        switch self {
-        case .add:
-            return nil
-        case .edit(let letter):
-            return letter
-        }
-    }
-}
-
-struct LetterEditorView: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var title: String
-    @State private var message: String
-    @State private var date: Date
-
-    let mode: LetterEditorMode
-    let onSave: (LoveLetter) -> Void
-
-    init(mode: LetterEditorMode, onSave: @escaping (LoveLetter) -> Void) {
-        let letter = mode.existingLetter
-        self.mode = mode
-        self.onSave = onSave
-        self._title = State(initialValue: letter?.title ?? "")
-        self._message = State(initialValue: letter?.message ?? "")
-        self._date = State(initialValue: letter?.date ?? Date())
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Lời nhắn") {
-                    TextField("Tiêu đề", text: $title)
-                    DatePicker("Ngày viết", selection: $date, displayedComponents: .date)
-                    TextEditor(text: $message)
-                        .frame(minHeight: 180)
-                }
-            }
-            .navigationTitle(mode.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Hủy") { dismiss() }
-                }
-
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Lưu") {
-                        onSave(
-                            LoveLetter(
-                                id: mode.existingLetter?.id ?? UUID(),
-                                title: title.trimmed,
-                                message: message.trimmed,
-                                date: date
-                            )
-                        )
-                        dismiss()
-                    }
-                    .disabled(title.trimmed.isEmpty || message.trimmed.isEmpty)
-                }
-            }
-        }
-    }
-}
-
 enum SpecialDayEditorMode {
     case add
     case edit(SpecialDay)
@@ -558,13 +481,19 @@ struct ProfileEditorSection: View {
                     .buttonStyle(.plain)
                     .onChange(of: selectedPhoto) { _, newValue in
                         Task {
-                            imagePath = await ImageLoader.imagePath(from: newValue, category: "profiles")
+                            let previousPath = imagePath
+                            let newPath = await ImageLoader.imagePath(from: newValue, category: "profiles")
+                            if previousPath != newPath {
+                                ImageFileStore.delete(previousPath)
+                            }
+                            imagePath = newPath
                         }
                     }
                     .animation(.spring(response: 0.3, dampingFraction: 0.78), value: avatarSize)
 
                     if imagePath != nil {
                         Button(role: .destructive) {
+                            ImageFileStore.delete(imagePath)
                             imagePath = nil
                         } label: {
                             Image(systemName: "xmark")
