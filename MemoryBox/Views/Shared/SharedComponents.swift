@@ -4,6 +4,9 @@
 //
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct MemoryRow: View {
     let memory: LoveMemory
@@ -83,7 +86,13 @@ struct KindFilterChip: View {
                 .foregroundStyle(isSelected ? .white : .primary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
-                .background(isSelected ? Color.pink : Color.white)
+                .background(isSelected ? Color.pink : AppTheme.chipBackground)
+                .overlay {
+                    if !isSelected {
+                        Capsule()
+                            .strokeBorder(Color(.separator).opacity(0.35), lineWidth: 1)
+                    }
+                }
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -100,7 +109,11 @@ struct InfoPill: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.white)
+            .background(AppTheme.chipBackground)
+            .overlay {
+                Capsule()
+                    .strokeBorder(Color(.separator).opacity(0.28), lineWidth: 1)
+            }
             .clipShape(Capsule())
     }
 }
@@ -213,7 +226,47 @@ struct EmptyStateView: View {
     }
 }
 
+enum AppLayout {
+    static let screenHorizontal: CGFloat = 20
+    static let homeHorizontal: CGFloat = 24
+    static let featuredMemoryHorizontal: CGFloat = 20
+    static let screenBottom: CGFloat = 24
+}
+
+extension View {
+    func appScrollMargins() -> some View {
+        contentMargins(.horizontal, AppLayout.screenHorizontal, for: .scrollContent)
+            .contentMargins(.bottom, AppLayout.screenBottom, for: .scrollContent)
+    }
+
+    func appHomeContentPadding() -> some View {
+        padding(.horizontal, AppLayout.homeHorizontal)
+            .padding(.bottom, AppLayout.screenBottom)
+    }
+}
+
 enum AppTheme {
-    static let background = Color(red: 0.99, green: 0.97, blue: 0.96)
+    static let background = Color(uiColor: dynamicColor(
+        light: UIColor(red: 0.99, green: 0.97, blue: 0.96, alpha: 1),
+        dark: UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1)
+    ))
+
+    static let surface = Color(uiColor: dynamicColor(
+        light: UIColor(white: 1.0, alpha: 0.82),
+        dark: UIColor(red: 0.15, green: 0.15, blue: 0.18, alpha: 1)
+    ))
+
+    static let chipBackground = Color(uiColor: dynamicColor(
+        light: UIColor(white: 1.0, alpha: 1.0),
+        dark: UIColor(red: 0.18, green: 0.18, blue: 0.22, alpha: 1)
+    ))
+
+    #if canImport(UIKit)
+    private static func dynamicColor(light: UIColor, dark: UIColor) -> UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark ? dark : light
+        }
+    }
+    #endif
 }
 

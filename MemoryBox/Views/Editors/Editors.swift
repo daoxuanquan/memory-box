@@ -125,7 +125,7 @@ struct MemoryEditorView: View {
                         .textInputAutocapitalization(.sentences)
                         .padding(.horizontal, 14)
                         .frame(height: 48)
-                        .background(.white.opacity(0.72))
+                        .background(AppTheme.surface)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                     if !imagePaths.isEmpty || isEditingMetadata {
@@ -140,7 +140,7 @@ struct MemoryEditorView: View {
                             .textInputAutocapitalization(.words)
                             .padding(.horizontal, 14)
                             .frame(height: 44)
-                            .background(.white.opacity(0.72))
+                            .background(AppTheme.surface)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
 
@@ -177,7 +177,7 @@ struct MemoryEditorView: View {
                     TextEditor(text: $note)
                         .frame(minHeight: 90)
                         .padding(8)
-                        .background(.white.opacity(0.72))
+                        .background(AppTheme.surface)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(alignment: .topLeading) {
                             if note.trimmed.isEmpty {

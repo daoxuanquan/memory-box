@@ -12,6 +12,7 @@ struct TimelineView: View {
     @State private var showingAddMemory = false
     @State private var editingMemory: LoveMemory?
     @State private var selectedKind: MemoryKind?
+    @State private var collageContainerWidth: CGFloat = 0
 
     private var sortedMemories: [LoveMemory] {
         filteredMemories.sorted { $0.date > $1.date }
@@ -24,52 +25,40 @@ struct TimelineView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                kindFilterBar
+            ZStack {
+                AnimatedLoveBackdrop()
+                    .ignoresSafeArea()
 
-                if sortedMemories.isEmpty {
-                    EmptyActionView(
-                        icon: "photo.badge.plus",
-                        title: selectedKind == nil ? "Chưa có kỷ niệm" : "Chưa có mục này",
-                        message: selectedKind == nil ? "Tạo kỷ niệm đầu tiên bằng ảnh, ngày và kiểu kỷ niệm." : "Đổi bộ lọc hoặc thêm kỷ niệm mới cho nhóm này.",
-                        actionTitle: "Thêm",
-                        action: { showingAddMemory = true }
-                    )
-                    .padding(.top, 70)
-                } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 14)], spacing: 14) {
-                        ForEach(Array(sortedMemories.enumerated()), id: \.element.id) { index, memory in
-                            NavigationLink {
-                                MemoryDetailView(memory: memory, onUpdate: onUpdate)
-                            } label: {
-                                MemoryPhotoCard(memory: memory, style: .grid, rotatesImages: index < 2)
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                Button {
-                                    editingMemory = memory
-                                } label: {
-                                    Label("Sửa", systemImage: "pencil")
-                                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        kindFilterBar
 
-                                Button {
-                                    toggleFavorite(memory)
-                                } label: {
-                                    Label("Yêu thích", systemImage: "heart.fill")
-                                }
-
-                                Button(role: .destructive) {
-                                    deleteMemory(id: memory.id)
-                                } label: {
-                                    Label("Xóa", systemImage: "trash")
-                                }
+                        if sortedMemories.isEmpty {
+                            EmptyActionView(
+                                icon: "photo.badge.plus",
+                                title: selectedKind == nil ? "Chưa có kỷ niệm" : "Chưa có mục này",
+                                message: selectedKind == nil ? "Tạo kỷ niệm đầu tiên bằng ảnh, ngày và kiểu kỷ niệm." : "Đổi bộ lọc hoặc thêm kỷ niệm mới cho nhóm này.",
+                                actionTitle: "Thêm",
+                                action: { showingAddMemory = true }
+                            )
+                            .padding(.top, 54)
+                        } else if collageContainerWidth > 0 {
+                            MemoryCollageGrid(
+                                memories: sortedMemories,
+                                containerWidth: collageContainerWidth
+                            ) { memory, index, size in
+                                memoryCollageCell(memory: memory, index: index, size: size)
                             }
                         }
                     }
-                    .padding(16)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.size.width
+                    } action: { newWidth in
+                        collageContainerWidth = newWidth
+                    }
                 }
+                .appScrollMargins()
             }
-            .background(AppTheme.background)
             .navigationTitle("Timeline")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -107,8 +96,37 @@ struct TimelineView: View {
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
+            .padding(.top, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func memoryCollageCell(memory: LoveMemory, index: Int, size: CGSize) -> some View {
+        NavigationLink {
+            MemoryDetailView(
+                memory: memory,
+                onUpdate: onUpdate,
+                onDelete: { deleteMemory(id: memory.id) }
+            )
+        } label: {
+            MemoryPhotoCard(memory: memory, style: .collage, rotatesImages: index < 2)
+        }
+        .buttonStyle(.plain)
+        .frame(width: size.width, height: size.height, alignment: .top)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contextMenu {
+            Button {
+                editingMemory = memory
+            } label: {
+                Label("Sửa", systemImage: "pencil")
+            }
+
+            Button {
+                toggleFavorite(memory)
+            } label: {
+                Label("Yêu thích", systemImage: "heart.fill")
+            }
         }
     }
 
@@ -127,76 +145,109 @@ struct TimelineView: View {
 struct MemoryDetailView: View {
     let memory: LoveMemory
     var onUpdate: ((LoveMemory) -> Void)?
+    var onDelete: (() -> Void)?
+    @Environment(\.dismiss) private var dismiss
     @State private var showingEditor = false
+    @State private var showingDeleteConfirmation = false
+
+    private var heroImagePath: String? {
+        memory.imagePaths.first ?? memory.imagePath
+    }
+
+    private var heroAspectRatio: CGFloat {
+        guard let heroImagePath,
+              let ratio = ImageFileStore.displayAspectRatio(for: heroImagePath),
+              ratio > 0 else {
+            return 4 / 3
+        }
+        return ratio
+    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                ZStack(alignment: .bottomLeading) {
-                    MemoryVisual(memory: memory)
-                        .frame(height: 320)
+        ZStack {
+            AnimatedLoveBackdrop()
+                .ignoresSafeArea()
 
-                    LinearGradient(
-                        colors: [.clear, .black.opacity(0.68)],
-                        startPoint: .center,
-                        endPoint: .bottom
-                    )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    ZStack(alignment: .bottomLeading) {
+                        MemoryVisual(memory: memory)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(memory.title)
-                            .font(.title.bold())
-                            .foregroundStyle(.white)
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.68)],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
 
-                        Label(memory.date.formatted(date: .long, time: .omitted), systemImage: "calendar")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.86))
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(memory.title)
+                                .font(.title.bold())
+                                .foregroundStyle(.white)
+
+                            Label(memory.date.formatted(date: .long, time: .omitted), systemImage: "calendar")
+                                .font(.subheadline)
+                                .foregroundStyle(.white.opacity(0.86))
+                        }
+                        .padding(18)
                     }
-                    .padding(18)
-                }
-                .frame(height: 320)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .aspectRatio(heroAspectRatio, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                if memory.imagePaths.count > 1 {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(memory.imagePaths, id: \.self) { path in
-                                StoredImageView(imagePath: path)
-                                    .frame(width: 92, height: 92)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    if memory.imagePaths.count > 1 {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                ForEach(memory.imagePaths, id: \.self) { path in
+                                    StoredImageView(imagePath: path)
+                                        .frame(width: 92, height: 92)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
                             }
                         }
                     }
-                }
 
-                HStack(spacing: 8) {
-                    InfoPill(icon: memory.displayKind.icon, text: memory.displayKind.rawValue)
-                    if !memory.place.trimmed.isEmpty {
-                        InfoPill(icon: "mappin.and.ellipse", text: memory.place)
+                    HStack(spacing: 8) {
+                        InfoPill(icon: memory.displayKind.icon, text: memory.displayKind.rawValue)
+                        if !memory.place.trimmed.isEmpty {
+                            InfoPill(icon: "mappin.and.ellipse", text: memory.place)
+                        }
+                    }
+
+                    InfoPill(icon: memory.mood.icon, text: memory.mood.rawValue)
+
+                    if !memory.note.trimmed.isEmpty {
+                        Text(memory.note)
+                            .font(.body)
+                            .lineSpacing(5)
+                            .foregroundStyle(.primary)
                     }
                 }
-
-                InfoPill(icon: memory.mood.icon, text: memory.mood.rawValue)
-
-                if !memory.note.trimmed.isEmpty {
-                    Text(memory.note)
-                        .font(.body)
-                        .lineSpacing(5)
-                        .foregroundStyle(.primary)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 20)
             }
-            .padding(20)
         }
-        .background(AppTheme.background)
         .navigationTitle("Chi tiết")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if onUpdate != nil {
-                ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if onUpdate != nil {
                     Button {
                         showingEditor = true
                     } label: {
                         Image(systemName: "pencil")
                     }
+                    .accessibilityLabel("Sửa kỷ niệm")
+                }
+
+                if onDelete != nil {
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .accessibilityLabel("Xóa kỷ niệm")
                 }
             }
         }
@@ -204,6 +255,15 @@ struct MemoryDetailView: View {
             MemoryEditorView(mode: .edit(memory)) { updatedMemory in
                 onUpdate?(updatedMemory)
             }
+        }
+        .alert("Xóa kỷ niệm?", isPresented: $showingDeleteConfirmation) {
+            Button("Hủy", role: .cancel) { }
+            Button("Xóa", role: .destructive) {
+                onDelete?()
+                dismiss()
+            }
+        } message: {
+            Text("Kỷ niệm này sẽ bị xóa khỏi timeline của hai bạn.")
         }
     }
 }

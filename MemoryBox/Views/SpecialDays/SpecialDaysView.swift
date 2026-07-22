@@ -11,6 +11,7 @@ struct SpecialDaysView: View {
     let onChange: () -> Void
     let onUpdate: (SpecialDay) -> Void
     @State private var editingDay: SpecialDay?
+    @State private var isShowingLunarCalendar = false
 
     private var sortedDays: [SpecialDay] {
         specialDays.sorted { $0.date.nextAnnualOccurrence() < $1.date.nextAnnualOccurrence() }
@@ -22,17 +23,29 @@ struct SpecialDaysView: View {
                 AnimatedLoveBackdrop()
                     .ignoresSafeArea()
 
-                if sortedDays.isEmpty {
-                    EmptyActionView(
-                        icon: "calendar.badge.plus",
-                        title: "Chưa có ngày",
-                        message: "Thêm những mốc cần nhớ.",
-                        actionTitle: "Thêm",
-                        action: onAddDay
-                    )
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 14) {
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        LunarSolarCalendarEntryCard {
+                            isShowingLunarCalendar = true
+                        }
+
+                        if sortedDays.isEmpty {
+                            EmptyActionView(
+                                icon: "calendar.badge.plus",
+                                title: "Chưa có ngày",
+                                message: "Thêm những mốc cần nhớ.",
+                                actionTitle: "Thêm",
+                                action: onAddDay
+                            )
+                            .background {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(.ultraThinMaterial)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(Color.white.opacity(0.48), lineWidth: 1)
+                                    )
+                            }
+                        } else {
                             ForEach(sortedDays) { day in
                                 SpecialDayListCard(
                                     day: day,
@@ -41,8 +54,8 @@ struct SpecialDaysView: View {
                                 )
                             }
                         }
-                        .padding(20)
                     }
+                    .padding(20)
                 }
             }
             .navigationTitle("Ngày đặc biệt")
@@ -58,6 +71,9 @@ struct SpecialDaysView: View {
                     onUpdate(updatedDay)
                 }
             }
+            .sheet(isPresented: $isShowingLunarCalendar) {
+                LunarSolarCalendarView()
+            }
         }
     }
 
@@ -70,6 +86,438 @@ struct SpecialDaysView: View {
     private func deleteDay(_ day: SpecialDay) {
         specialDays.removeAll { $0.id == day.id }
         onChange()
+    }
+}
+
+struct LunarSolarCalendarEntryCard: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: "calendar")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 48, height: 48)
+                    .background(
+                        LinearGradient(
+                            colors: [Color.blue.opacity(0.92), Color.pink.opacity(0.78)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Lịch âm dương")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    Text("Xem ngày dương và ngày âm tương ứng")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 10)
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.56), lineWidth: 1)
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Mở lịch âm dương")
+    }
+}
+
+struct LunarSolarCalendarView: View {
+    enum DisplayMode: String, CaseIterable, Identifiable {
+        case day = "Ngày"
+        case year = "Năm"
+
+        var id: String { rawValue }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedDate = Date()
+    @State private var displayMode: DisplayMode = .day
+
+    private var solarDateText: String {
+        selectedDate.vietnameseSolarDateText
+    }
+
+    private var lunarDateText: String {
+        selectedDate.fullLunarDateText
+    }
+
+    private var selectedYear: Int {
+        Calendar.current.component(.year, from: selectedDate)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Picker("Chế độ xem", selection: $displayMode) {
+                        ForEach(DisplayMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if displayMode == .day {
+                        dailyCalendarContent
+                    } else {
+                        YearCalendarView(year: selectedYear, selectedDate: $selectedDate)
+                    }
+                }
+                .padding(20)
+            }
+            .background(AnimatedLoveBackdrop().ignoresSafeArea())
+            .navigationTitle("Lịch âm dương")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Xong") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var dailyCalendarContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            MonthlyCalendarView(selectedDate: $selectedDate)
+
+            VStack(alignment: .leading, spacing: 12) {
+                LunarSolarCalendarInfoRow(
+                    icon: "sun.max.fill",
+                    title: "Dương lịch",
+                    value: solarDateText,
+                    color: .orange
+                )
+
+                LunarSolarCalendarInfoRow(
+                    icon: "moon.stars.fill",
+                    title: "Âm lịch",
+                    value: lunarDateText,
+                    color: .blue
+                )
+            }
+            .padding(16)
+            .background(.white.opacity(0.58))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(0.58), lineWidth: 1)
+            )
+        }
+    }
+}
+
+struct MonthlyCalendarView: View {
+    @Binding var selectedDate: Date
+
+    private var calendar: Calendar {
+        Calendar.current
+    }
+
+    private var monthDate: Date {
+        let components = calendar.dateComponents([.year, .month], from: selectedDate)
+        return calendar.date(from: DateComponents(year: components.year, month: components.month, day: 1)) ?? selectedDate
+    }
+
+    private var monthTitle: String {
+        "\(monthDate.vietnameseMonthText) \(calendar.component(.year, from: monthDate))"
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Button {
+                    moveMonth(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Tháng trước")
+
+                Spacer()
+
+                Text(monthTitle)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+
+                Spacer()
+
+                Button {
+                    moveMonth(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Tháng sau")
+            }
+
+            CalendarMonthGrid(
+                year: calendar.component(.year, from: monthDate),
+                month: calendar.component(.month, from: monthDate),
+                selectedDate: $selectedDate,
+                cellHeight: 44,
+                dayFontSize: 16,
+                lunarFontSize: 10,
+                showsWeekdayHeader: true
+            )
+        }
+        .padding(14)
+        .background(.white.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.58), lineWidth: 1)
+        )
+    }
+
+    private func moveMonth(by value: Int) {
+        guard let newDate = calendar.date(byAdding: .month, value: value, to: selectedDate) else {
+            return
+        }
+
+        selectedDate = newDate
+    }
+}
+
+struct LunarSolarCalendarInfoRow: View {
+    let icon: String
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(color.gradient, in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(value)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
+            }
+        }
+    }
+}
+
+struct YearCalendarView: View {
+    let year: Int
+    @Binding var selectedDate: Date
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Button {
+                    moveYear(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Năm trước")
+
+                Spacer()
+
+                Text("Năm \(year)")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+
+                Spacer()
+
+                Button {
+                    moveYear(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Năm sau")
+            }
+            .padding(.horizontal, 4)
+
+            LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(1...12, id: \.self) { month in
+                    MonthCalendarCard(year: year, month: month, selectedDate: $selectedDate)
+                }
+            }
+        }
+    }
+
+    private func moveYear(by value: Int) {
+        guard let newDate = Calendar.current.date(byAdding: .year, value: value, to: selectedDate) else {
+            return
+        }
+
+        selectedDate = newDate
+    }
+}
+
+struct MonthCalendarCard: View {
+    let year: Int
+    let month: Int
+    @Binding var selectedDate: Date
+
+    private var monthTitle: String {
+        "Tháng \(month)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(monthTitle)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            CalendarMonthGrid(year: year, month: month, selectedDate: $selectedDate)
+        }
+        .padding(10)
+        .background(.white.opacity(0.66))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.58), lineWidth: 1)
+        )
+    }
+}
+
+struct CalendarMonthGrid: View {
+    let year: Int
+    let month: Int
+    @Binding var selectedDate: Date
+    var cellHeight: CGFloat = 30
+    var dayFontSize: CGFloat = 10
+    var lunarFontSize: CGFloat = 7
+    var showsWeekdayHeader = false
+
+    private let calendar = Calendar.current
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 7)
+    private let weekdays = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+
+    private var monthDate: Date {
+        calendar.date(from: DateComponents(year: year, month: month, day: 1)) ?? Date()
+    }
+
+    private var leadingEmptyDays: Int {
+        let weekday = calendar.component(.weekday, from: monthDate)
+        return (weekday + 5) % 7
+    }
+
+    private var dates: [Date] {
+        guard let range = calendar.range(of: .day, in: .month, for: monthDate) else {
+            return []
+        }
+
+        return range.compactMap { day in
+            calendar.date(from: DateComponents(year: year, month: month, day: day))
+        }
+    }
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 3) {
+            if showsWeekdayHeader {
+                ForEach(weekdays, id: \.self) { weekday in
+                    Text(weekday)
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 18)
+                }
+            }
+
+            ForEach(0..<leadingEmptyDays, id: \.self) { _ in
+                Color.clear
+                    .frame(height: cellHeight)
+            }
+
+            ForEach(dates, id: \.self) { date in
+                MonthDayCell(
+                    date: date,
+                    isSelected: date.startOfDay == selectedDate.startOfDay,
+                    isToday: date.startOfDay == Date().startOfDay,
+                    cellHeight: cellHeight,
+                    dayFontSize: dayFontSize,
+                    lunarFontSize: lunarFontSize
+                ) {
+                    selectedDate = date
+                }
+            }
+        }
+    }
+}
+
+struct MonthDayCell: View {
+    let date: Date
+    let isSelected: Bool
+    let isToday: Bool
+    var cellHeight: CGFloat = 30
+    var dayFontSize: CGFloat = 10
+    var lunarFontSize: CGFloat = 7
+    let action: () -> Void
+
+    private var dayNumber: Int {
+        Calendar.current.component(.day, from: date)
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 1) {
+                Text("\(dayNumber)")
+                    .font(.system(size: dayFontSize, weight: isSelected || isToday ? .bold : .semibold, design: .rounded))
+                    .foregroundStyle(isSelected ? .white : .primary)
+                    .lineLimit(1)
+
+                Text(date.lunarDayText)
+                    .font(.system(size: lunarFontSize, weight: .medium, design: .rounded))
+                    .foregroundStyle(isSelected ? .white.opacity(0.85) : .secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: cellHeight)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.pink)
+                } else if isToday {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color.pink.opacity(0.55), lineWidth: 1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -92,6 +540,10 @@ struct SpecialDayListCard: View {
 
     private var counterCaption: String {
         daysUntil == 0 ? "đến rồi" : "ngày nữa"
+    }
+
+    private var lunarDateText: String {
+        nextDate.shortLunarDateText
     }
 
     var body: some View {
@@ -132,6 +584,12 @@ struct SpecialDayListCard: View {
                         .padding(.vertical, 4)
                         .background(Color.white.opacity(0.62), in: Capsule())
                 }
+
+                Label(lunarDateText, systemImage: "moon.stars.fill")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 54), spacing: 5)], alignment: .leading, spacing: 5) {
                     ForEach(["1 tháng", "7 ngày", "3 ngày", "1 ngày"], id: \.self) { reminder in
@@ -191,6 +649,53 @@ struct SpecialDayListCard: View {
                         .stroke(Color.white.opacity(0.56), lineWidth: 1)
                 )
         }
+    }
+}
+
+private extension Date {
+    var vietnameseSolarDateText: String {
+        let components = Calendar.current.dateComponents([.day, .month, .year], from: self)
+        guard let day = components.day, let month = components.month, let year = components.year else {
+            return ""
+        }
+
+        return "Ngày \(day), tháng \(month), năm \(year)"
+    }
+
+    var vietnameseMonthText: String {
+        let month = Calendar.current.component(.month, from: self)
+        return "Tháng \(month)"
+    }
+
+    var lunarDayText: String {
+        let components = lunarComponents
+        guard let day = components.day, let month = components.month else {
+            return ""
+        }
+
+        return day == 1 ? "\(day)/\(month)" : "\(day)"
+    }
+
+    var shortLunarDateText: String {
+        let components = lunarComponents
+        guard let day = components.day, let month = components.month else {
+            return "Âm lịch"
+        }
+
+        return "Âm \(day)/\(month)"
+    }
+
+    var fullLunarDateText: String {
+        let components = lunarComponents
+        guard let day = components.day, let month = components.month, let year = components.year else {
+            return "Chưa có dữ liệu"
+        }
+
+        return "Ngày \(day), tháng \(month), năm \(year)"
+    }
+
+    private var lunarComponents: DateComponents {
+        Calendar(identifier: .chinese).dateComponents([.day, .month, .year], from: self)
     }
 }
 
@@ -258,5 +763,3 @@ struct UpcomingSpecialDayRow: View {
         }
     }
 }
-
-

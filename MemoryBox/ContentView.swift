@@ -7,6 +7,7 @@ import CoreData
 import SwiftUI
 
 struct ContentView: View {
+    @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.light.rawValue
     @State private var selectedTab: AppTab = .home
     @State private var memories: [LoveMemory] = []
     @State private var messages: [LoveMessage] = []
@@ -18,8 +19,6 @@ struct ContentView: View {
     @State private var arrivalQueue: [LoveMessage] = []
     @State private var presentedArrivalMessage: LoveMessage?
     @State private var acknowledgedArrivalIDs: Set<UUID> = []
-    @State private var didPresentDebugArrival = false
-    @State private var debugArrivalID: UUID?
 
     private var daysTogether: Int {
         guard hasRelationshipStart else { return 0 }
@@ -42,8 +41,13 @@ struct ContentView: View {
         MemoryStore.unreadIncomingMessages(from: messages).count
     }
 
+    private var appAppearance: AppAppearance {
+        AppAppearance(rawValue: appearanceRaw) ?? .light
+    }
+
     var body: some View {
         tabContent
+            .preferredColorScheme(appAppearance.colorScheme)
             .tint(.pink)
             .sheet(item: $activeSheet, content: sheetContent)
             .overlay {
@@ -103,7 +107,8 @@ struct ContentView: View {
             onOpenSettings: showSettings,
             onEditProfile: showEditProfile,
             onSetRelationshipStart: saveRelationshipStart,
-            onUpdateMemory: updateMemory
+            onUpdateMemory: updateMemory,
+            onDeleteMemory: deleteMemory
         )
         .tabItem { Label("Trang chủ", systemImage: "house.fill") }
         .tag(AppTab.home)
@@ -209,6 +214,12 @@ struct ContentView: View {
         Task { memories = await MemoryStore.loadMemories() }
     }
 
+    private func deleteMemory(id: UUID) {
+        memories.removeAll { $0.id == id }
+        MemoryStore.save(memories: memories)
+        Task { memories = await MemoryStore.loadMemories() }
+    }
+
     private func saveSpecialDay(_ day: SpecialDay) {
         specialDays.append(day)
         specialDays = specialDays.sorted { first, second in
@@ -258,27 +269,9 @@ struct ContentView: View {
         profile = await loadedProfile
         relationshipStart = MemoryStore.loadStartDate()
         hasRelationshipStart = MemoryStore.loadHasStartDate()
-        AppIconManager.setIcon(MemoryStore.loadAppIconChoice())
+        _ = await AppIconManager.setIcon(MemoryStore.loadAppIconChoice())
         refreshNotificationSchedule()
-        presentDebugArrivalIfNeeded()
         refreshArrivalQueue()
-    }
-
-    private func presentDebugArrivalIfNeeded() {
-        #if DEBUG
-        guard !didPresentDebugArrival else { return }
-        didPresentDebugArrival = true
-
-        let myRole = MemoryStore.currentSenderRole()
-        let senderRole: MessageSenderRole = myRole == .first ? .second : .first
-        let fake = LoveMessage(
-            message: "Hôm nay dù có thế nào thì em vẫn muốn nói rằng em rất thương anh. Cảm ơn anh vì luôn ở đây cùng em nhé!",
-            senderRole: senderRole,
-            mood: .sweet
-        )
-        debugArrivalID = fake.id
-        presentedArrivalMessage = fake
-        #endif
     }
 
     private func reloadMessages() async {
@@ -287,11 +280,6 @@ struct ContentView: View {
     }
 
     private func refreshArrivalQueue() {
-        // Không đụng tới popup tin giả (Debug) để còn test UI.
-        if let debugArrivalID, presentedArrivalMessage?.id == debugArrivalID {
-            return
-        }
-
         let unread = MemoryStore.unreadIncomingMessages(from: messages)
         let pending = unread.filter { !acknowledgedArrivalIDs.contains($0.id) }
         arrivalQueue = pending
@@ -307,9 +295,6 @@ struct ContentView: View {
     private func hideArrival(_ message: LoveMessage) {
         // Ẩn trong phiên hiện tại, vẫn giữ chưa đọc để badge còn hiện.
         acknowledgedArrivalIDs.insert(message.id)
-        if message.id == debugArrivalID {
-            debugArrivalID = nil
-        }
         withAnimation(.easeOut(duration: 0.2)) {
             presentedArrivalMessage = nil
         }
@@ -324,14 +309,6 @@ struct ContentView: View {
     }
 
     private func acknowledgeArrival(_ message: LoveMessage) {
-        if message.id == debugArrivalID {
-            debugArrivalID = nil
-            withAnimation(.easeOut(duration: 0.2)) {
-                presentedArrivalMessage = nil
-            }
-            return
-        }
-
         MemoryStore.markLoveMessageRead(id: message.id)
         acknowledgedArrivalIDs.insert(message.id)
         presentedArrivalMessage = nil

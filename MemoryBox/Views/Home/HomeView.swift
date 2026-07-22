@@ -22,6 +22,7 @@ struct HomeView: View {
     let onEditProfile: (ProfilePerson) -> Void
     let onSetRelationshipStart: (Date) -> Void
     let onUpdateMemory: (LoveMemory) -> Void
+    let onDeleteMemory: (UUID) -> Void
     @State private var draftRelationshipStart = Date()
     @State private var showingStartDateEditor = false
     @State private var confirmingStartDateChange = false
@@ -61,12 +62,16 @@ struct HomeView: View {
 
                         if let featuredMemory {
                             NavigationLink {
-                                MemoryDetailView(memory: featuredMemory, onUpdate: onUpdateMemory)
+                                MemoryDetailView(
+                                    memory: featuredMemory,
+                                    onUpdate: onUpdateMemory,
+                                    onDelete: { onDeleteMemory(featuredMemory.id) }
+                                )
                             } label: {
                                 FeaturedMemoryCard(memory: featuredMemory)
                             }
                             .buttonStyle(.plain)
-                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, AppLayout.featuredMemoryHorizontal - AppLayout.homeHorizontal)
                         }
 
                         if !recentMemories.isEmpty {
@@ -80,7 +85,8 @@ struct HomeView: View {
                             daysTogether: max(daysTogether, 0)
                         )
                     }
-                    .padding(20)
+                    .appHomeContentPadding()
+                    .frame(maxWidth: .infinity)
                 }
             }
             .navigationTitle("Memory Love")
@@ -247,7 +253,11 @@ struct HomeView: View {
             HStack(spacing: 12) {
                 ForEach(Array(recentMemories.enumerated()), id: \.element.id) { index, memory in
                     NavigationLink {
-                        MemoryDetailView(memory: memory, onUpdate: onUpdateMemory)
+                        MemoryDetailView(
+                            memory: memory,
+                            onUpdate: onUpdateMemory,
+                            onDelete: { onDeleteMemory(memory.id) }
+                        )
                     } label: {
                         MemoryPhotoCard(memory: memory, style: .compact, rotatesImages: index < 2)
                     }

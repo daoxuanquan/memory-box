@@ -16,8 +16,19 @@ import UIKit
 struct FeaturedMemoryCard: View {
     let memory: LoveMemory
 
+    private var featuredImagePath: String? {
+        memory.imagePaths.first ?? memory.imagePath
+    }
+
+    private var displayAspectRatio: CGFloat {
+        guard let featuredImagePath else { return 4 / 3 }
+        return ImageFileStore.displayAspectRatio(for: featuredImagePath) ?? 4 / 3
+    }
+
     var body: some View {
         MemoryPhotoCard(memory: memory, style: .featured)
+            .aspectRatio(displayAspectRatio, contentMode: .fit)
+            .frame(maxWidth: .infinity)
             .shadow(color: memory.mood.color.opacity(0.18), radius: 14, y: 8)
     }
 }
@@ -26,6 +37,7 @@ enum MemoryPhotoCardStyle {
     case featured
     case grid
     case compact
+    case collage
 
     var height: CGFloat {
         switch self {
@@ -35,6 +47,8 @@ enum MemoryPhotoCardStyle {
             return 190
         case .compact:
             return 160
+        case .collage:
+            return 0
         }
     }
 
@@ -42,6 +56,8 @@ enum MemoryPhotoCardStyle {
         switch self {
         case .compact:
             return 150
+        case .collage:
+            return nil
         default:
             return nil
         }
@@ -51,6 +67,8 @@ enum MemoryPhotoCardStyle {
         switch self {
         case .featured:
             return .title2.bold()
+        case .collage:
+            return .subheadline.weight(.bold)
         default:
             return .headline
         }
@@ -98,13 +116,12 @@ struct MemoryPhotoCard: View {
                 Text(memory.title)
                     .font(style.titleFont)
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(style == .collage ? 1 : 2)
                     .minimumScaleFactor(0.78)
             }
-            .padding(14)
+            .padding(style == .collage ? 10 : 14)
         }
-        .frame(width: style.width)
-        .frame(height: style.height)
+        .applyMemoryPhotoCardFrame(style: style)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .task(id: memory.imagePaths) {
@@ -122,6 +139,21 @@ struct MemoryPhotoCard: View {
             withAnimation(.easeInOut(duration: 0.38)) {
                 imageIndex = (imageIndex + 1) % memory.imagePaths.count
             }
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func applyMemoryPhotoCardFrame(style: MemoryPhotoCardStyle) -> some View {
+        switch style {
+        case .featured:
+            frame(maxWidth: .infinity)
+        case .collage:
+            frame(maxWidth: .infinity, maxHeight: .infinity)
+        default:
+            frame(width: style.width)
+                .frame(height: style.height)
         }
     }
 }
@@ -165,10 +197,10 @@ struct StoredImageView: View {
                 .resizable()
                 .scaledToFill()
         } else {
-            Color.gray.opacity(0.2)
+            Color(.tertiarySystemFill)
         }
         #else
-        Color.gray.opacity(0.2)
+        Color(.tertiarySystemFill)
         #endif
     }
 }
@@ -237,6 +269,11 @@ enum ImageFileStore {
     #if canImport(UIKit)
     static func uiImage(for relativePath: String) -> UIImage? {
         UIImage(contentsOfFile: fileURL(for: relativePath).path)
+    }
+
+    static func displayAspectRatio(for relativePath: String) -> CGFloat? {
+        guard let image = uiImage(for: relativePath), image.size.height > 0 else { return nil }
+        return image.size.width / image.size.height
     }
     #endif
 

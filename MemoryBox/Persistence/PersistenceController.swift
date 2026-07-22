@@ -263,7 +263,8 @@ final class PersistenceController {
                 attribute("secondImagePath", type: .stringAttributeType, isOptional: true),
                 attribute("secondAvatarSize", type: .doubleAttributeType, defaultValue: CoupleProfile.defaultAvatarSize),
                 attribute("secondImageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
-                attribute("appIconRawValue", type: .stringAttributeType, isOptional: true)
+                attribute("appIconRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("customAppIconData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true)
             ]
         )
     }
@@ -370,7 +371,7 @@ enum MemoryStore {
     static func save(memories: [LoveMemory]) {
         migrateUserDefaultsIfNeeded()
         let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space)
+        let targetStore = persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
         upsert(memories: memories, space: space, store: targetStore)
         upsertPhotos(for: memories, space: space, store: targetStore)
         saveContext()
@@ -378,8 +379,12 @@ enum MemoryStore {
 
     static func loadLoveMessages() async -> [LoveMessage] {
         await ensureMigrated()
+        await MainActor.run {
+            migrateMisplacedMessagesToActiveStore()
+            saveContext()
+        }
         let ctx = PersistenceController.shared.newReadContext()
-        return await ctx.perform {
+        let objects = await ctx.perform {
             purgeLegacyLetters(in: ctx)
             return fetchObjects(
                 entityName: "StoredLetter",
@@ -387,8 +392,8 @@ enum MemoryStore {
                 in: activeCoupleStore(ctx),
                 ctx
             )
-            .compactMap(makeLoveMessage)
         }
+        return objects.compactMap(makeLoveMessage)
     }
 
     static func currentSenderRole() -> MessageSenderRole {
@@ -406,12 +411,21 @@ enum MemoryStore {
     static func sendLoveMessage(_ draft: LoveMessageDraft) -> LoveMessage? {
         migrateUserDefaultsIfNeeded()
         purgeLegacyLetters()
+        migrateMisplacedMessagesToActiveStore()
 
         let trimmedMessage = draft.message.trimmed
         guard !trimmedMessage.isEmpty || draft.imageData != nil else { return nil }
 
-        let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space)
+        guard let space = activeCoupleSpaceObject() else {
+            MemoryLog.share("sendLoveMessage: chưa có CoupleSpace trong store đang dùng")
+            return nil
+        }
+
+        guard let targetStore = activeCoupleStore() ?? persistentStore(for: space) else {
+            MemoryLog.share("sendLoveMessage: không xác định được persistent store")
+            return nil
+        }
+
         let entity = entityDescription(named: "StoredLetter")
         let object = NSManagedObject(entity: entity, insertInto: context)
         assign(object, to: targetStore)
@@ -426,6 +440,7 @@ enum MemoryStore {
         object.setValue(message.id, forKey: "id")
         apply(message, to: object, space: space)
         saveContext()
+        NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
         return message
     }
 
@@ -488,21 +503,21 @@ enum MemoryStore {
     static func loadSpecialDays() async -> [SpecialDay] {
         await ensureMigrated()
         let ctx = PersistenceController.shared.newReadContext()
-        return await ctx.perform {
+        let objects = await ctx.perform {
             fetchObjects(
                 entityName: "StoredSpecialDay",
                 sortDescriptors: [NSSortDescriptor(key: "date", ascending: true)],
                 in: activeCoupleStore(ctx),
                 ctx
             )
-            .compactMap(makeSpecialDay)
         }
+        return objects.compactMap(makeSpecialDay)
     }
 
     static func save(specialDays: [SpecialDay]) {
         migrateUserDefaultsIfNeeded()
         let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space)
+        let targetStore = persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
         upsert(specialDays: specialDays, space: space, store: targetStore)
         saveContext()
     }
@@ -564,11 +579,20 @@ enum MemoryStore {
         saveContext()
     }
 
+    private static var isPreparingCoupleShare = false
+
     static func prepareCoupleShare(completion: @escaping (CKShare?, CKContainer?, Error?) -> Void) {
         let finish: (CKShare?, CKContainer?, Error?) -> Void = { share, container, error in
-            MemoryLog.share("prepareCoupleShare finish: share=\(share?.url?.absoluteString ?? "nil"), container=\(container?.containerIdentifier ?? "nil"), error=\(error?.localizedDescription ?? "nil")")
+            isPreparingCoupleShare = false
+            MemoryLog.share("prepareCoupleShare finish: share=\(share?.url?.absoluteString ?? "nil"), publicPermission=\(share?.publicPermission.rawValue ?? -1), container=\(container?.containerIdentifier ?? "nil"), error=\(error?.localizedDescription ?? "nil")")
             DispatchQueue.main.async { completion(share, container, error) }
         }
+
+        guard !isPreparingCoupleShare else {
+            MemoryLog.share("prepareCoupleShare: đang chạy -> bỏ qua")
+            return
+        }
+        isPreparingCoupleShare = true
 
         MemoryLog.share("prepareCoupleShare: bắt đầu")
         migrateUserDefaultsIfNeeded()
@@ -580,14 +604,17 @@ enum MemoryStore {
                 NSError(
                     domain: "MemoryBox.CloudSharing",
                     code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "This device is already participating in a shared MemoryBox."]
+                    userInfo: [NSLocalizedDescriptionKey: "Thiết bị này đã tham gia không gian MemoryBox được chia sẻ."]
                 )
             )
             return
         }
 
         let space = existingOrNewCoupleSpace()
-        backfillSpaceRelationships(space, in: persistentStore(for: space))
+        backfillSpaceRelationships(
+            space,
+            in: persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
+        )
         saveContext()
         MemoryLog.share("prepareCoupleShare: space objectID=\(space.objectID), isTemporary=\(space.objectID.isTemporaryID)")
 
@@ -601,11 +628,54 @@ enum MemoryStore {
         }
 
         let persistentContainer = cloudKitContainer
+        let ckContainer = CKContainer(identifier: PersistenceController.cloudKitContainerIdentifier)
+        let spaceObjectID = space.objectID
+
+        let configureAndPersist: (CKShare) -> Void = { share in
+            share[CKShare.SystemFieldKey.title] = "MemoryBox của hai người" as CKRecordValue
+
+            if share.publicPermission == .readWrite, share.url != nil {
+                MemoryLog.share("prepareCoupleShare: share đã có link công khai -> trả về ngay")
+                finish(share, ckContainer, nil)
+                return
+            }
+
+            share.publicPermission = .readWrite
+
+            guard let store = PersistenceController.shared.privatePersistentStore else {
+                MemoryLog.share("prepareCoupleShare: thiếu privatePersistentStore")
+                finish(share, ckContainer, nil)
+                return
+            }
+
+            MemoryLog.share("prepareCoupleShare: persistUpdatedShare publicPermission=\(share.publicPermission.rawValue)")
+            DispatchQueue.main.async {
+                persistentContainer.persistUpdatedShare(share, in: store) { persistedShare, persistError in
+                    if let persistError {
+                        MemoryLog.share("prepareCoupleShare: persistUpdatedShare error=\(persistError.localizedDescription)")
+                        finish(share, ckContainer, persistError)
+                        return
+                    }
+
+                    do {
+                        let latestShare = try persistentContainer.fetchShares(matching: [spaceObjectID])[spaceObjectID]
+                            ?? persistedShare
+                            ?? share
+                        MemoryLog.share("prepareCoupleShare: share sau persist url=\(latestShare.url?.absoluteString ?? "nil")")
+                        finish(latestShare, ckContainer, nil)
+                    } catch {
+                        MemoryLog.share("prepareCoupleShare: refetch share lỗi: \(error.localizedDescription)")
+                        finish(persistedShare ?? share, ckContainer, error)
+                    }
+                }
+            }
+        }
+
         do {
-            let existingShares = try persistentContainer.fetchShares(matching: [space.objectID])
-            if let existingShare = existingShares[space.objectID] {
-                MemoryLog.share("prepareCoupleShare: đã có share sẵn -> trả về")
-                finish(existingShare, CKContainer(identifier: PersistenceController.cloudKitContainerIdentifier), nil)
+            let existingShares = try persistentContainer.fetchShares(matching: [spaceObjectID])
+            if let existingShare = existingShares[spaceObjectID] {
+                MemoryLog.share("prepareCoupleShare: đã có share sẵn -> cập nhật quyền link công khai")
+                configureAndPersist(existingShare)
                 return
             }
             MemoryLog.share("prepareCoupleShare: chưa có share -> tạo mới")
@@ -616,28 +686,32 @@ enum MemoryStore {
         }
 
         MemoryLog.share("prepareCoupleShare: gọi container.share(...)")
-        persistentContainer.share([space], to: nil) { _, share, container, error in
-            MemoryLog.share("prepareCoupleShare: share() callback share=\(share != nil), container=\(container != nil), error=\(error?.localizedDescription ?? "nil")")
-            guard let share, let container else {
+        persistentContainer.share([space], to: nil) { _, share, _, error in
+            MemoryLog.share("prepareCoupleShare: share() callback share=\(share != nil), error=\(error?.localizedDescription ?? "nil")")
+            guard let share else {
                 finish(nil, nil, error)
                 return
             }
-
-            share[CKShare.SystemFieldKey.title] = "MemoryBox của hai người" as CKRecordValue
-            // Cho phép ai có link (người kia) mở và join với quyền sửa, không cần thêm sẵn Apple ID.
-            share.publicPermission = .readWrite
-
-            guard let store = PersistenceController.shared.privatePersistentStore else {
-                MemoryLog.share("prepareCoupleShare: thiếu privatePersistentStore")
-                finish(share, container, error)
-                return
-            }
-
-            persistentContainer.persistUpdatedShare(share, in: store) { _, persistError in
-                MemoryLog.share("prepareCoupleShare: persistUpdatedShare error=\(persistError?.localizedDescription ?? "nil")")
-                finish(share, container, persistError ?? error)
-            }
+            configureAndPersist(share)
         }
+    }
+
+    static func fetchCoupleShareURL(share: CKShare, container: CKContainer) async -> URL? {
+        if let url = share.url {
+            return url
+        }
+
+        do {
+            let record = try await container.privateCloudDatabase.record(for: share.recordID)
+            if let refreshedShare = record as? CKShare, let url = refreshedShare.url {
+                MemoryLog.share("fetchCoupleShareURL: lấy được url=\(url.absoluteString)")
+                return url
+            }
+        } catch {
+            MemoryLog.share("fetchCoupleShareURL lỗi: \(error.localizedDescription)")
+        }
+
+        return nil
     }
 
     static func acceptShareInvitation(_ metadata: CKShare.Metadata) {
@@ -647,11 +721,14 @@ enum MemoryStore {
             return
         }
         cloudKitContainer.acceptShareInvitations(from: [metadata], into: sharedStore) { _, error in
-            if let error {
-                MemoryLog.share("acceptShareInvitation: THẤT BẠI: \(error.localizedDescription)")
-            } else {
-                MemoryLog.share("acceptShareInvitation: THÀNH CÔNG")
-                NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
+            DispatchQueue.main.async {
+                if let error {
+                    MemoryLog.share("acceptShareInvitation: THẤT BẠI: \(error.localizedDescription)")
+                } else {
+                    MemoryLog.share("acceptShareInvitation: THÀNH CÔNG")
+                    MemoryStore.reconcileAfterCloudSync()
+                    NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
+                }
             }
         }
     }
@@ -667,6 +744,7 @@ enum MemoryStore {
         purgeLegacyLetters()
         deduplicateCoupleSpaces()
         deduplicateSettings()
+        migrateMisplacedMessagesToActiveStore()
         saveContext()
     }
 
@@ -709,7 +787,7 @@ enum MemoryStore {
 
         let startDate = storedStartDateValue.map(Date.init(timeIntervalSince1970:)) ?? Date()
         let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space)
+        let targetStore = persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
 
         upsert(memories: memories, space: space, store: targetStore)
         upsertPhotos(for: memories, space: space, store: targetStore)
@@ -734,7 +812,14 @@ enum MemoryStore {
         )
         guard spaces.count > 1 else { return }
 
-        let keeper = spaces.max(by: { spaceContentScore($0) < spaceContentScore($1) }) ?? spaces[0]
+        let keeper: NSManagedObject
+        if let sharedStore = PersistenceController.shared.sharedPersistentStore,
+           let sharedSpace = spaces.first(where: { $0.objectID.persistentStore == sharedStore }) {
+            keeper = sharedSpace
+        } else {
+            keeper = spaces.max(by: { spaceContentScore($0) < spaceContentScore($1) }) ?? spaces[0]
+        }
+
         for space in spaces where space.objectID != keeper.objectID {
             if samePersistentStore(space, keeper) {
                 reassignChildren(from: space, to: keeper)
@@ -742,6 +827,48 @@ enum MemoryStore {
             } else if spaceContentScore(space) == 0 {
                 context.delete(space)
             }
+        }
+    }
+
+    private static func migrateMisplacedMessagesToActiveStore() {
+        guard let activeStore = activeCoupleStore(),
+              let activeSpace = activeCoupleSpaceObject() else { return }
+
+        let misplacedStores = [PersistenceController.shared.privatePersistentStore, PersistenceController.shared.sharedPersistentStore]
+            .compactMap { $0 }
+            .filter { $0 != activeStore }
+
+        guard !misplacedStores.isEmpty else { return }
+
+        let existingIDs = Set(
+            fetchObjects(entityName: "StoredLetter", in: activeStore)
+                .compactMap { $0.value(forKey: "id") as? UUID }
+        )
+
+        var didMigrate = false
+        for store in misplacedStores {
+            for object in fetchObjects(entityName: "StoredLetter", in: store) {
+                guard let message = makeLoveMessage(from: object) else {
+                    context.delete(object)
+                    didMigrate = true
+                    continue
+                }
+
+                if !existingIDs.contains(message.id) {
+                    let entity = entityDescription(named: "StoredLetter")
+                    let copy = NSManagedObject(entity: entity, insertInto: context)
+                    assign(copy, to: activeStore)
+                    copy.setValue(message.id, forKey: "id")
+                    apply(message, to: copy, space: activeSpace)
+                }
+
+                context.delete(object)
+                didMigrate = true
+            }
+        }
+
+        if didMigrate {
+            MemoryLog.share("migrateMisplacedMessagesToActiveStore: đã chuyển tin nhắn sang store đang dùng")
         }
     }
 
@@ -764,7 +891,7 @@ enum MemoryStore {
         }
 
         if keeper.value(forKey: "space") == nil {
-            keeper.setValue(coupleSpaceObject(), forKey: "space")
+            keeper.setValue(activeCoupleSpaceObject() ?? coupleSpaceObject(in: activeCoupleStore()), forKey: "space")
         }
     }
 
@@ -1207,22 +1334,31 @@ enum MemoryStore {
         }
     }
 
+    private static func activeCoupleSpaceObject(_ ctx: NSManagedObjectContext = context) -> NSManagedObject? {
+        coupleSpaceObject(in: activeCoupleStore(ctx), ctx)
+    }
+
     private static func existingOrNewCoupleSpace() -> NSManagedObject {
-        if let space = coupleSpaceObject() {
+        if let space = activeCoupleSpaceObject() {
             return space
         }
 
+        let targetStore = activeCoupleStore() ?? PersistenceController.shared.privatePersistentStore
         let space = NSManagedObject(entity: entityDescription(named: "CoupleSpace"), insertInto: context)
-        assign(space, to: PersistenceController.shared.privatePersistentStore)
+        assign(space, to: targetStore)
         space.setValue(coupleSpaceID, forKey: "id")
         space.setValue(Date(), forKey: "createdAt")
         return space
     }
 
-    private static func coupleSpaceObject(_ ctx: NSManagedObjectContext = context) -> NSManagedObject? {
+    private static func coupleSpaceObject(
+        in store: NSPersistentStore? = nil,
+        _ ctx: NSManagedObjectContext = context
+    ) -> NSManagedObject? {
         let spaces = fetchObjects(
             entityName: "CoupleSpace",
             predicate: NSPredicate(format: "id == %@", coupleSpaceID),
+            in: store,
             ctx
         )
         guard !spaces.isEmpty else { return nil }
@@ -1247,7 +1383,7 @@ enum MemoryStore {
         }
 
         let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space)
+        let targetStore = persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
         if let settings = fetchFirstObject(
             entityName: "AppSettings",
             predicate: NSPredicate(format: "id == %@", settingsID),
@@ -1315,7 +1451,17 @@ enum MemoryStore {
             return sharedStore
         }
 
-        return coupleSpaceObject(ctx).flatMap(persistentStore(for:))
+        if let privateStore = PersistenceController.shared.privatePersistentStore,
+           fetchFirstObject(
+                entityName: "CoupleSpace",
+                predicate: NSPredicate(format: "id == %@", coupleSpaceID),
+                in: privateStore,
+                ctx
+           ) != nil {
+            return privateStore
+        }
+
+        return PersistenceController.shared.privatePersistentStore
     }
 
     private static func entityDescription(named name: String) -> NSEntityDescription {
@@ -1326,7 +1472,7 @@ enum MemoryStore {
     }
 
     private static func persistentStore(for object: NSManagedObject) -> NSPersistentStore? {
-        object.objectID.persistentStore ?? PersistenceController.shared.privatePersistentStore
+        object.objectID.persistentStore
     }
 
     private static func assign(_ object: NSManagedObject, to store: NSPersistentStore?) {

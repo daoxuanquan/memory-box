@@ -5,18 +5,19 @@
 
 import CloudKit
 import SwiftUI
-import UIKit
 import UserNotifications
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var preparedShare: PreparedShare?
+    @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.light.rawValue
+    @State private var inviteSheet: ShareInvitePayload?
     @State private var isPreparingShare = false
     @State private var shareErrorText: String?
     @State private var iCloudStatusText = "Đang kiểm tra..."
     @State private var notificationStatusText = "Đang kiểm tra..."
     @State private var isUsingSharedSpace = false
     @State private var selectedAppIcon: AppIconChoice = .dragonBulliesPig
+    @State private var iconErrorText: String?
 
     var body: some View {
         NavigationStack {
@@ -26,7 +27,7 @@ struct SettingsView: View {
                     LabeledContent("Thông báo", value: notificationStatusText)
 
                     Button {
-                        prepareShare()
+                        prepareInviteLink()
                     } label: {
                         HStack {
                             Label("Mời ai đó chia sẻ dữ liệu", systemImage: "person.badge.plus")
@@ -57,19 +58,39 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Icon ứng dụng") {
-                    Picker("Chọn icon", selection: $selectedAppIcon) {
-                        ForEach(AppIconChoice.allCases) { choice in
-                            Text(choice.title).tag(choice)
+                Section("Giao diện") {
+                    Picker("Chế độ hiển thị", selection: $appearanceRaw) {
+                        ForEach(AppAppearance.allCases) { mode in
+                            Label(mode.title, systemImage: mode.icon)
+                                .tag(mode.rawValue)
                         }
                     }
-                    .pickerStyle(.inline)
-                    .onChange(of: selectedAppIcon) { _, choice in
-                        AppIconManager.setIcon(choice)
-                        MemoryStore.save(appIcon: choice)
-                    }
+                    .pickerStyle(.segmented)
 
-                    Text("Lựa chọn icon sẽ đồng bộ qua iCloud để thiết bị của cả hai người cùng đổi.")
+                    Text("App luôn dùng chế độ bạn chọn, không theo cài đặt Sáng/Tối của iPhone.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Icon ứng dụng") {
+                    HStack(spacing: 20) {
+                        ForEach(AppIconChoice.allCases) { choice in
+                            AppIconOptionRow(
+                                imageName: choice.previewImageName,
+                                isSelected: selectedAppIcon == choice
+                            ) {
+                                Task {
+                                    await selectAppIcon(choice)
+                                }
+                            }
+                            .accessibilityLabel(choice.title)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 4)
+
+                    Text("Lựa chọn sẽ đồng bộ qua iCloud.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -83,18 +104,23 @@ struct SettingsView: View {
                     }
                 }
             }
-            .sheet(item: $preparedShare) { prepared in
-                ShareInviteSheet(share: prepared.share)
+            .sheet(item: $inviteSheet) { payload in
+                ShareInviteSheet(share: payload.share, container: payload.container)
             }
             .alert("Không tạo được link chia sẻ", isPresented: shareErrorBinding) {
                 Button("Đóng", role: .cancel) { shareErrorText = nil }
             } message: {
                 Text(shareErrorText ?? "")
             }
+            .alert("Không đổi được icon", isPresented: iconErrorBinding) {
+                Button("Đóng", role: .cancel) { iconErrorText = nil }
+            } message: {
+                Text(iconErrorText ?? "")
+            }
             .task {
                 let syncedChoice = MemoryStore.loadAppIconChoice()
                 selectedAppIcon = syncedChoice
-                AppIconManager.setIcon(syncedChoice)
+                _ = await AppIconManager.setIcon(syncedChoice)
                 refreshShareState()
                 await refreshCloudStatus()
                 await refreshNotificationPermission(requestIfNeeded: false)
@@ -102,12 +128,46 @@ struct SettingsView: View {
         }
     }
 
+    private var iconErrorBinding: Binding<Bool> {
+        Binding(
+            get: { iconErrorText != nil },
+            set: { if !$0 { iconErrorText = nil } }
+        )
+    }
+
+    private func selectAppIcon(_ choice: AppIconChoice) async {
+        let previousChoice = selectedAppIcon
+        selectedAppIcon = choice
+
+        let result = await AppIconManager.setIcon(choice)
+        switch result {
+        case .success:
+            MemoryStore.save(appIcon: choice)
+        case .failure(let error):
+            selectedAppIcon = previousChoice
+            iconErrorText = error.localizedDescription
+        }
+    }
+
     private var shareHelpText: String {
         if isUsingSharedSpace {
-            return "Thiết bị này đang dùng không gian MemoryBox được chia sẻ qua CloudKit."
+            return "Thiết bị này đã tham gia không gian MemoryBox được chia sẻ. Dữ liệu sẽ đồng bộ qua iCloud."
         }
 
-        return "Người được mời cần đăng nhập iCloud, cài MemoryBox và chấp nhận link mời. Sau đó dữ liệu trong không gian chung sẽ đồng bộ qua CloudKit."
+        return "Tạo link mời để gửi cho người ấy. Khi họ mở link và chấp nhận, hai máy sẽ đồng bộ dữ liệu qua iCloud."
+    }
+
+    private func prepareInviteLink() {
+        guard !isPreparingShare else { return }
+        isPreparingShare = true
+        MemoryStore.prepareCoupleShare { share, container, error in
+            isPreparingShare = false
+            if let share, let container {
+                inviteSheet = ShareInvitePayload(share: share, container: container)
+            } else {
+                shareErrorText = error?.localizedDescription ?? "Không tạo được link mời."
+            }
+        }
     }
 
     private var shareErrorBinding: Binding<Bool> {
@@ -115,23 +175,6 @@ struct SettingsView: View {
             get: { shareErrorText != nil },
             set: { if !$0 { shareErrorText = nil } }
         )
-    }
-
-    private func prepareShare() {
-        MemoryLog.share("SettingsView: bấm nút 'Mời ai đó chia sẻ' (isUsingSharedSpace=\(isUsingSharedSpace))")
-        guard !isPreparingShare else { return }
-        isPreparingShare = true
-        MemoryStore.prepareCoupleShare { share, container, error in
-            isPreparingShare = false
-            if let share, let container {
-                MemoryLog.share("SettingsView: share sẵn sàng -> present controller")
-                preparedShare = PreparedShare(share: share, container: container)
-            } else {
-                let message = error?.localizedDescription ?? "Lỗi không xác định"
-                MemoryLog.share("SettingsView: chuẩn bị share thất bại: \(message)")
-                shareErrorText = message
-            }
-        }
     }
 
     private func refreshShareState() {
@@ -172,81 +215,33 @@ struct SettingsView: View {
     }
 }
 
-struct PreparedShare: Identifiable {
-    let share: CKShare
-    let container: CKContainer
-
-    var id: String { share.url?.absoluteString ?? share.recordID.recordName }
-}
-
-struct ShareInviteSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let share: CKShare
-    @State private var didCopy = false
-
-    private var link: URL? { share.url }
+private struct AppIconOptionRow: View {
+    let imageName: String
+    let isSelected: Bool
+    let action: () -> Void
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 24) {
-                Image(systemName: "link.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.pink)
-                    .padding(.top, 24)
+        Button(action: action) {
+            VStack(spacing: 10) {
+                Image(imageName)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 64, height: 64)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(isSelected ? Color.pink : Color.secondary.opacity(0.25), lineWidth: isSelected ? 2.5 : 1)
+                    )
+                    .shadow(color: isSelected ? Color.pink.opacity(0.28) : .clear, radius: 8, y: 3)
 
-                Text("Gửi link này cho người ấy")
-                    .font(.title3.bold())
-
-                Text("Người nhận cần đăng nhập iCloud và đã cài MemoryBox. Bấm vào link để tham gia và cùng chỉnh sửa.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-
-                if let link {
-                    Text(link.absoluteString)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .padding()
-                        .frame(maxWidth: .infinity)
-                        .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .padding(.horizontal)
-
-                    Button {
-                        UIPasteboard.general.url = link
-                        didCopy = true
-                    } label: {
-                        Label(didCopy ? "Đã sao chép" : "Sao chép link", systemImage: didCopy ? "checkmark" : "doc.on.doc")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.pink)
-                    .padding(.horizontal)
-
-                    ShareLink(item: link) {
-                        Label("Chia sẻ qua ứng dụng khác", systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .padding(.horizontal)
-                } else {
-                    Text("Chưa lấy được link chia sẻ. Vui lòng thử lại.")
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-            }
-            .navigationTitle("Mời chia sẻ")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Đóng") { dismiss() }
-                }
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(isSelected ? Color.pink : Color.secondary.opacity(0.55))
+                    .accessibilityLabel(isSelected ? "Đã chọn" : "Chưa chọn")
             }
         }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

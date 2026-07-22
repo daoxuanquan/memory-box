@@ -336,19 +336,37 @@ struct InsightMetricTile: View {
 }
 
 struct AnimatedLoveBackdrop: View {
+    @Environment(\.colorScheme) private var colorScheme
     @State private var drift = false
 
     private let heartSymbols = ["heart.fill", "sparkles", "heart.circle.fill", "heart.fill", "sparkles"]
 
+    private var gradientColors: [Color] {
+        if colorScheme == .dark {
+            return [
+                Color.pink.opacity(0.16),
+                Color.purple.opacity(0.12),
+                Color.orange.opacity(0.08),
+                Color(red: 0.07, green: 0.07, blue: 0.09)
+            ]
+        }
+
+        return [
+            Color.pink.opacity(0.24),
+            Color.orange.opacity(0.16),
+            Color.purple.opacity(0.14),
+            Color.white.opacity(0.72)
+        ]
+    }
+
+    private var heartOpacity: Double {
+        colorScheme == .dark ? 0.16 : 0.28
+    }
+
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [
-                    Color.pink.opacity(0.24),
-                    Color.orange.opacity(0.16),
-                    Color.purple.opacity(0.14),
-                    Color.white.opacity(0.72)
-                ],
+                colors: gradientColors,
                 startPoint: drift ? .topTrailing : .topLeading,
                 endPoint: drift ? .bottomLeading : .bottomTrailing
             )
@@ -360,7 +378,7 @@ struct AnimatedLoveBackdrop: View {
                 ForEach(Array(heartSymbols.enumerated()), id: \.offset) { index, symbol in
                     Image(systemName: symbol)
                         .font(.system(size: index.isMultiple(of: 2) ? 30 : 20, weight: .semibold))
-                        .foregroundStyle(.white.opacity(index.isMultiple(of: 2) ? 0.32 : 0.24))
+                        .foregroundStyle(.white.opacity(heartOpacity))
                         .position(
                             x: width * CGFloat([0.14, 0.34, 0.58, 0.78, 0.9][index]),
                             y: height * CGFloat([0.22, 0.78, 0.34, 0.68, 0.18][index])
