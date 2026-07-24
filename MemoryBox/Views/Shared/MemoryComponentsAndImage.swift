@@ -8,7 +8,6 @@ import PhotosUI
 import Photos
 import ImageIO
 import CoreLocation
-import MapKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -389,25 +388,22 @@ enum ImageLoader {
 
     private static func placeName(from location: CLLocation?) async -> String? {
         guard let location else { return nil }
-        guard let request = MKReverseGeocodingRequest(location: location) else {
+
+        let placemarks = try? await CLGeocoder().reverseGeocodeLocation(location)
+        guard let placemark = placemarks?.first else {
             return coordinateText(from: location)
         }
 
-        let mapItems = await withCheckedContinuation { continuation in
-            request.getMapItems { mapItems, _ in
-                continuation.resume(returning: mapItems)
-            }
-        }
-
-        guard let mapItem = mapItems?.first else {
-            return coordinateText(from: location)
-        }
-
-        let displayName = mapItem.name?.trimmed
-        let fullAddress = mapItem.addressRepresentations?.fullAddress(includingRegion: true, singleLine: true)?.trimmed.replacingOccurrences(of: "\n", with: ", ")
-        let parts = [displayName, fullAddress]
-            .compactMap { $0 }
-            .filter { !$0.isEmpty && $0 != "Unknown Location" }
+        let parts = [
+            placemark.name,
+            placemark.thoroughfare,
+            placemark.subLocality,
+            placemark.locality,
+            placemark.administrativeArea,
+            placemark.country
+        ]
+            .compactMap { $0?.trimmed }
+            .filter { !$0.isEmpty }
             .uniqued()
 
         return parts.isEmpty ? coordinateText(from: location) : parts.joined(separator: ", ")
