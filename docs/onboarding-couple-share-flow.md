@@ -1,689 +1,846 @@
-# MemoryBox — Onboarding & Couple Share Flow Spec
+# MemoryBox — Onboarding & Couple Share Flow Spec (v2)
 
-> Spec cho AI/agent implement. Mọi màn hình, nút, kích thước, trạng thái, và chuyển bước phải tuân theo file này trừ khi product đổi spec.
+> **Docs-only spec** — Codex/agent implement theo file này. Không code trong bước viết spec.
 >
-> **Mục tiêu:** lần mở app đầu tiên luôn rõ “tôi tạo không gian mới” hay “tôi tham gia bằng link”, không để user tự tìm Settings để share.
+> **Mục tiêu product (đơn giản):**
+> 1. Mở app → **3 lựa chọn**
+> 2. **Tự thiết lập dữ liệu** → tạo / dùng không gian riêng mới (hoặc tiếp tục private trống); sau này **có thể share**
+> 3. **Tải dữ liệu cũ** → **bắt buộc** load được private data đã có (local và/hoặc iCloud). Fail → lỗi + **Thử lại** / **Quay Welcome**. **Không** vào MainTab “ảo” trống như thành công
+> 4. **Nhập từ link được mời** → **chỉ** dùng shared data; fail → lỗi + retry / Quay Welcome; **không fallback** private
+> 5. **Đã có dữ liệu + chọn nhập link** → bỏ data cũ trên UI; **bắt buộc** load shared
 
 ---
 
-## 0. Tóm tắt vấn đề hiện tại
+## 0. Quy tắc vàng (data)
 
-| Vấn đề | Hậu quả |
-|--------|---------|
-| Không có onboarding | User vào Home trống, không biết phải mời partner |
-| Share chôn trong Settings | Tỷ lệ couple sync thấp |
-| Accept link im lặng | Partner không biết đã join thành công / thất bại |
-| Role = heuristic store | `.first`/`.second` sai nếu cả 2 từng có data riêng |
-| Không leave / stop share | Không quản lý được couple space |
-| `ContentView` + `MemoryStore` static | Logic share/onboarding không có owner rõ ràng |
+| Tình huống | Hành vi bắt buộc |
+|------------|------------------|
+| User chọn **Tự thiết lập** | `activeDataSource = .ownPrivate`. Tạo CoupleSpace private nếu chưa có. **Không** bắt buộc đã có data cũ. |
+| User chọn **Tải dữ liệu cũ** | Vào **restore session** (§2B). **Phải** tìm được data private hợp lệ. Fail → `RestoreDataErrorView` — **không** MainTab. |
+| User chọn **Nhập từ link** | Vào **import session** (§3.0). **Cấm** đọc private cho UI chính cho đến khi shared load OK **hoặc** user **Quay Welcome**. |
+| User chọn **Nhập từ link** + máy **đã có** local/private data | Confirm abandon (§3.3). Sau confirm: private **ẩn**; **không** hiện lại khi shared fail. |
+| Shared zone **chưa sẵn sàng** | **Không** MainTab. **Không** fallback private. `SharedImportErrorView`. |
+| Shared zone **OK**, records chưa import | MainTab **shared-only** + banner sync. |
+| Restore / Import fail → **Quay Welcome** | Hủy session. User chọn lại 1 trong 3 option. |
+| User **Tự thiết lập** xong, sau đó **Share** | Private space → share root. |
+| User đang **participant** | Không Welcome lại. Muốn data riêng → **Rời không gian** (Settings). |
 
----
+**Cấm tuyệt đối:**
 
-## 1. Khái niệm domain (bắt buộc hiểu trước khi code)
+- Import path: `if sharedFail { showPrivateData() }`
+- Restore path: `if restoreFail { openEmptyMainTab() }` hoặc giả thành công
+- Vào MainTab khi `importSessionActive` / `restoreSessionActive` chưa success
+- Im lặng fail rồi hiện Home với data sai path
 
-### 1.1 Couple Space
-
-- 1 không gian dữ liệu cho 2 người: kỷ niệm, tin nhắn, ngày đặc biệt, hồ sơ, ngày bắt đầu.
-- CloudKit root: `CoupleSpace` (`id == "main"` hoặc UUID ổn định sau migrate).
-- **Owner:** tạo space ở private store, tạo `CKShare`, gửi link.
-- **Participant:** accept share → data nằm shared store.
-
-### 1.2 Identity (vai trò)
-
-Không còn suy luận chỉ từ “có shared store hay không”.
-
-Lưu rõ trong `AppSettings` / `OnboardingState`:
-
-| Field | Ý nghĩa |
-|-------|---------|
-| `myRole` | `.first` hoặc `.second` (user tự chọn lúc onboarding) |
-| `partnerRole` | role còn lại |
-| `spaceMembership` | `.soloPendingInvite` \| `.owner` \| `.participant` \| `.localOnly` |
-| `onboardingCompleted` | `Bool` — gate root UI |
-| `hasChosenPath` | đã chọn Create / Join |
-
-### 1.3 Ba đường vào app
-
-```
-A. Create couple space (Owner)
-B. Join via invite link (Participant)
-C. Continue alone (Local / invite later)
-```
-
-Path C vẫn có thể mời partner sau từ Home/Settings.
+**Không làm trong MVP:** merge private ↔ shared, undo abandon, auto-switch path khi fail.
 
 ---
 
-## 2. Root gate (App launch)
+## 1. Ba lựa chọn mở app
 
-```
-MemoryBoxApp
-  └─ RootCoordinatorView
-       ├─ if !onboardingCompleted → OnboardingFlowView
-       ├─ else if pendingShareAccept → JoinResultOverlay
-       └─ else → MainTabView (Home / Kỷ niệm / Tin nhắn / Ngày)
-```
-
-### 2.1 Khi nào hiện Onboarding
-
-Hiện **full-screen onboarding** nếu:
-
-- `onboardingCompleted == false`, **hoặc**
-- lần đầu cài (không có `AppSettings` / flag local), **hoặc**
-- vừa wipe data / reinstall mà chưa restore được space membership.
-
-**Không** hiện lại onboarding nếu user đã complete, kể cả profile còn trống (dùng soft nudge trên Home).
-
-### 2.2 Deep link / CloudKit accept xen giữa
-
-Nếu OS gọi `userDidAcceptCloudKitShareWith` trong lúc onboarding chưa xong:
-
-1. Pause wizard tại step hiện tại (giữ state).
-2. Chạy accept → hiện `JoinResultView`.
-3. Nếu success: set `spaceMembership = .participant`, `onboardingCompleted = true`, nhảy soft vào “Chọn bạn là ai” nếu chưa có `myRole`.
-4. Nếu fail: alert + quay lại step đang đứng (thường Welcome / Join).
-
----
-
-## 3. Visual system (áp dụng mọi màn onboarding)
-
-### 3.1 Layout khung
-
-| Token | Value |
-|-------|-------|
-| Horizontal padding | **24 pt** |
-| Top safe area content inset | **16 pt** dưới notch |
-| Bottom CTA inset | **16 pt** trên home indicator |
-| Max content width | **390 pt** (center trên iPad) |
-| Screen background | `AnimatedLoveBackdrop` full bleed |
-| Card surface | `AppTheme.surface`, corner **16**, padding trong **16–20** |
-
-### 3.2 Typography
-
-| Role | Font |
-|------|------|
-| Brand / hero title | `.largeTitle.bold()` hoặc rounded **34** |
-| Step title | `.title2.bold()` |
-| Body | `.body` / `.subheadline` secondary |
-| CTA primary | `.headline` white on pink |
-| CTA secondary | `.subheadline.weight(.semibold)` pink/primary |
-| Footnote | `.footnote` secondary |
-
-### 3.3 Buttons
-
-| Style | Size | Spec |
-|-------|------|------|
-| **Primary CTA** | height **52**, full width trong padding 24 | `.borderedProminent`, tint pink, corner 14 |
-| **Secondary CTA** | height **48**, full width | `.bordered` hoặc plain text button |
-| **Tertiary / skip** | height **44**, text only | secondary color, center |
-| **Icon circle** | **56×56** | dùng cho avatar pick trên onboarding |
-| **Back** | toolbar leading chevron | chỉ hiện từ step ≥ 2 |
-
-Primary luôn **1 nút** / màn. Secondary optional. Không đặt 2 primary cạnh nhau.
-
-### 3.4 Progress
-
-- Top: `OnboardingProgressBar` — height **4**, track gray 0.2, fill pink.
-- Steps Create path: Welcome → WhoAmI → Profile → StartDate → InvitePartner → Done
-- Steps Join path: Welcome → JoinExplain → (system accept) → WhoAmI → Profile → Done
-- Steps Solo path: Welcome → WhoAmI → Profile → StartDate → Done (Invite later)
-
-Progress chỉ đếm steps của path đang chọn.
-
-### 3.5 Motion
-
-- Step transition: `.push` horizontal hoặc opacity 0.2s.
-- Success: heart scale spring 1 lần.
-- Không spam particle trên mọi step — chỉ Welcome + Done.
-
----
-
-## 4. Flow A — Create couple space (Owner)
-
-### Step A0 — Welcome
+### 1.1 Welcome (màn duy nhất trước MainTab)
 
 **File:** `Views/Onboarding/WelcomeView.swift`  
 **ViewModel:** `WelcomeViewModel`
 
-#### UI
-
 ```
 ┌─────────────────────────────────┐
-│         [progress none]         │
-│                                 │
 │     [heart animation 72pt]      │
-│                                 │
-│         Memory Love             │  ← brand, largeTitle
-│   Khoảnh khắc của hai bạn       │  ← subheadline secondary
+│         Memory Love             │
+│   Khoảnh khắc của hai bạn       │
 │                                 │
 │  ┌───────────────────────────┐  │
-│  │  Tạo không gian cặp đôi   │  │  ← Primary 52h
+│  │  Tự thiết lập dữ liệu     │  │  ← Primary, 52h
 │  └───────────────────────────┘  │
 │  ┌───────────────────────────┐  │
-│  │  Tôi có link mời          │  │  ← Secondary 48h
+│  │  Tải dữ liệu cũ           │  │  ← Secondary, 48h
+│  └───────────────────────────┘  │
+│  ┌───────────────────────────┐  │
+│  │  Nhập từ link được mời    │  │  ← Secondary, 48h
 │  └───────────────────────────┘  │
 │                                 │
-│     Tiếp tục một mình trước     │  ← Tertiary text
-│                                 │
-│  Cần iCloud đã đăng nhập để     │
-│  đồng bộ với người ấy.          │  ← footnote
+│  • Tự thiết lập: bắt đầu mới   │
+│    trên máy này, sau đó có thể  │
+│    mời người ấy.                │
+│  • Tải dữ liệu cũ: khôi phục    │
+│    kỷ niệm đã có trên máy /     │
+│    iCloud.                      │
+│  • Nhập link: dùng không gian   │
+│    người ấy đã mời.             │  ← footnote
 └─────────────────────────────────┘
 ```
 
-#### Actions
+| Nút | `onboardingChoice` | Đi tiếp |
+|-----|-------------------|---------|
+| **Tự thiết lập dữ liệu** | `.setupOwn` | §2 |
+| **Tải dữ liệu cũ** | `.restoreOwn` | §2B |
+| **Nhập từ link được mời** | `.importFromLink` | §3 |
 
-| Control | Action |
-|---------|--------|
-| **Tạo không gian cặp đôi** | `path = .create` → check iCloud → nếu OK đi A1; nếu fail → `iCloudRequiredSheet` |
-| **Tôi có link mời** | `path = .join` → B1 |
-| **Tiếp tục một mình trước** | confirm alert nhẹ → `path = .solo` → A1 (skip Invite) |
+Spacing giữa 3 CTA: **12 pt**. Primary chỉ 1 nút (Tự thiết lập).
 
-#### iCloudRequiredSheet
+### 1.2 Khi nào hiện Welcome
 
-- Title: “Cần iCloud”
-- Body: giải thích MemoryBox đồng bộ qua iCloud.
-- Primary: “Mở Cài đặt iCloud” → `UIApplication.openSettingsURLString`
-- Secondary: “Để sau” → vẫn cho vào Solo path.
+| Điều kiện | Hiện Welcome? |
+|-----------|---------------|
+| `onboardingCompleted == false` | Có |
+| Lần đầu cài, chưa có flag | Có |
+| Đã complete + đang dùng own hoặc shared | Không → MainTab |
+| OS deliver share accept **trước** khi user chọn | Xử lý §4.2 (ưu tiên import path) |
 
-#### Validation trước Create
+### 1.3 Layout tokens
 
-```
-CKContainer.accountStatus
-  .available → tiếp
-  còn lại → sheet, không tạo CKShare
-```
+| Token | Value |
+|-------|-------|
+| Horizontal padding | **24 pt** |
+| Primary CTA height | **52 pt** |
+| Secondary CTA height | **48 pt** |
+| Background | `AnimatedLoveBackdrop` |
+| Card / field surface | `AppTheme.surface`, corner **16** |
 
 ---
 
-### Step A1 — Who am I? (chọn vai)
+## 2. Path — Tự thiết lập dữ liệu
 
-**File:** `WhoAmIView.swift` / `WhoAmIViewModel`
+### 2.1 Luồng
 
-#### UI
+```
+Welcome [Tự thiết lập]
+  → (optional) WhoAmI — chọn first/second
+  → (optional) Profile + Start date — skip được
+  → Done
+  → MainTab (Home) — private (có thể trống)
+```
+
+Share **không** nằm trong onboarding. Chỉ trong **Cài đặt → Mời người ấy** hoặc banner Home (§6).
+
+### 2.2 Hành vi
+
+1. User bấm **Tự thiết lập**.
+2. Ensure private `CoupleSpace` (tạo mới nếu chưa có).
+3. Set `activeDataSource = .ownPrivate`, `spaceMembership = .ownLocal`.
+4. Optional setup → Skip được.
+5. `onboardingCompleted = true` → MainTab.
+
+**Khác với “Tải dữ liệu cũ”:** path này **không** fail nếu chưa có memories. Empty Home là hợp lệ.
+
+Nếu máy **đã có** private data sẵn (reinstall chưa wipe): vẫn vào MainTab với data đó — không bắt buộc gọi restore session. User muốn **chắc chắn** load từ iCloud thì dùng §2B.
+
+### 2.3 Share sau (happy)
+
+**Settings → Mời người ấy** hoặc Home banner:
+
+1. Check iCloud `.available`.
+2. `prepareCoupleShare()` trên private CoupleSpace.
+3. Sheet: copy link + ShareLink.
+4. `spaceMembership = .ownSharedPendingPartner`.
+
+Partner Accept → participant dùng shared store (§3).
+
+---
+
+## 2B. Path — Tải dữ liệu cũ (restore own — bắt buộc load được)
+
+### 2B.0 Restore session
+
+Khi user bấm **Tải dữ liệu cũ**:
+
+```
+restoreSessionActive = true
+onboardingChoice = .restoreOwn
+activeDataSource = .ownPrivate   // intent — chỉ private
+restorePhase = .probing
+```
+
+**Kết thúc session chỉ khi:**
+
+| Kết thúc | Điều kiện |
+|----------|-----------|
+| **Success** | `restorePhase == .ready` — đã load được data hợp lệ → MainTab |
+| **User abort** | **Quay lại Welcome** → `restoreSessionActive = false` |
+| **Không** | Fail / timeout — **không** coi là success, **không** MainTab |
+
+#### Định nghĩa “load được” (success criteria)
+
+Ít nhất **một** trong các điều kiện:
+
+1. `hasLocalCoupleData == true` (memories OR messages OR specialDays OR profile/startDate đã set trên **private** store), **hoặc**
+2. Sau sync iCloud private: `CoupleSpace` + ít nhất 1 record nội dung (memory/message/specialDay/settings profile), **hoặc**
+3. Policy MVP chặt: chỉ cần `CoupleSpace` private tồn tại **và** `AppSettings.startDateIsSet == true` **hoặc** có ≥1 memory — **khuyến nghị dùng (1)+(2)**.
+
+**Fail** nếu sau probe/hydrate: không thỏa success criteria.
+
+#### State machine `restorePhase`
+
+```
+probing                 // kiểm tra local private ngay
+  ↓ có data local đủ
+ready                   // → MainTab
+  ↓ chưa đủ / cần iCloud
+syncingFromCloud        // pull CloudKit private + poll
+  ↓ có data
+ready
+  ↓ timeout / lỗi / không có gì
+failed(error)           // RestoreDataErrorView — KHÔNG MainTab
+```
+
+### 2B.1 Luồng UI
+
+```
+Welcome [Tải dữ liệu cũ]
+  → RestoreDataLoadingView
+       ├─ success → (optional) WhoAmI nhẹ / Done → MainTab (private data cũ)
+       └─ fail    → RestoreDataErrorView (Thử lại / Quay Welcome)
+```
+
+### 2B.2 RestoreDataLoadingView
+
+**File:** `RestoreDataLoadingView.swift`
 
 ```
 ┌─────────────────────────────────┐
-│  ▓▓▓░░░░  step 1/n              │
-│  ← Back                         │
+│     ProgressView + heart        │
+│  Đang tải dữ liệu cũ            │
+│  Kiểm tra máy và iCloud…        │
 │                                 │
-│  Bạn là ai trong câu chuyện?    │
-│  Chọn một bên — có thể đổi tên  │
-│  ở bước sau.                    │
-│                                 │
-│  ┌─────────┐   ♥   ┌─────────┐  │
-│  │ Avatar  │       │ Avatar  │  │  ← 88×88 circles
-│  │  Người  │       │  Người  │  │
-│  │ thứ nhất│       │ thứ hai │  │
-│  │ [radio] │       │ [radio] │  │
-│  └─────────┘       └─────────┘  │
-│                                 │
-│  ┌───────────────────────────┐  │
-│  │         Tiếp tục          │  │
-│  └───────────────────────────┘  │
+│  (substatus)                    │
 └─────────────────────────────────┘
 ```
 
-#### Spec ô chọn
+| Phase | Substatus |
+|-------|-----------|
+| `probing` | Đang tìm dữ liệu trên máy… |
+| `syncingFromCloud` | Đang đồng bộ từ iCloud… |
 
-- Card size: width `(screen - 48 - 16) / 2`, min height **140**
-- Selected: stroke pink **2.5**, shadow pink 0.2
-- Unselected: stroke separator 1
-- Tap card = chọn role; Primary disabled đến khi có selection
+**Poll policy:**
 
-#### Actions
+- Local probe: ngay lập tức
+- Cloud sync: interval 1s, max **45s**
+- Hết 45s không đủ success criteria → `failed(.restoreNotFound)` hoặc `.hydrationTimeout`
 
-| Control | Action |
-|---------|--------|
-| Card left/right | set `myRole` |
-| Tiếp tục | save `myRole` → A2 |
-| Back | Welcome |
+Back gesture: confirm “Hủy tải dữ liệu cũ?” → Quay Welcome.
 
----
+### 2B.3 RestoreDataErrorView
 
-### Step A2 — Hồ sơ của bạn
-
-**File:** `OnboardingProfileView.swift`  
-Chỉ edit **myRole** (không bắt buộc edit partner ở bước này).
-
-#### UI
+**File:** `RestoreDataErrorView.swift`
 
 ```
 ┌─────────────────────────────────┐
-│  progress                       │
-│  ←                              │
-│  Hồ sơ của bạn                  │
-│  Thêm ảnh và tên để partner     │
-│  nhận ra bạn.                   │
+│  ⚠️                             │
+│  Không tải được dữ liệu cũ      │
 │                                 │
-│         (  avatar 108  )        │
-│         [Đổi ảnh]               │
-│                                 │
-│  Tên                            │
-│  ┌───────────────────────────┐  │
-│  │ TextField height 48        │  │
-│  └───────────────────────────┘  │
-│                                 │
-│  Màu / icon (optional row)      │
+│  {errorMessage}                 │
 │                                 │
 │  ┌───────────────────────────┐  │
-│  │         Tiếp tục          │  │
+│  │       Thử lại             │  │  ← Primary
 │  └───────────────────────────┘  │
-│         Bỏ qua bước này         │
+│  ┌───────────────────────────┐  │
+│  │   Quay lại Welcome        │  │  ← Secondary
+│  └───────────────────────────┘  │
 └─────────────────────────────────┘
 ```
 
-#### Rules
+| Nút | Hành vi |
+|-----|---------|
+| **Thử lại** | Chạy lại Loading / probe + sync; session vẫn active |
+| **Quay lại Welcome** | `restoreSessionActive = false`; về Welcome chọn option khác |
 
-- Tên: trim, max 40 ký tự; **không bắt buộc** (Skip được).
-- Ảnh: PhotosPicker, compress như `EditProfileView` hiện tại.
-- Skip → giữ empty name, vẫn đi tiếp.
-- Tiếp tục với tên rỗng → OK (soft).
+**Không có** nút “Vào trang chủ trống” / “Bỏ qua”.
+
+#### Error codes → copy
+
+| Code | Message |
+|------|---------|
+| `restoreNotFound` | Không tìm thấy dữ liệu cũ trên máy hoặc iCloud. Hãy chọn Tự thiết lập hoặc Nhập từ link. |
+| `icloudUnavailable` | Cần đăng nhập iCloud để tải dữ liệu đã đồng bộ trước đây. |
+| `networkUnavailable` | Cần mạng để đồng bộ dữ liệu cũ từ iCloud. |
+| `hydrationTimeout` | Đồng bộ quá lâu. Thử lại hoặc kiểm tra mạng / iCloud. |
+| `storeError` | Không đọc được dữ liệu. Thử lại sau. |
+
+### 2B.4 Success
+
+- `restorePhase = .ready`
+- `restoreSessionActive = false`
+- `activeDataSource = .ownPrivate`
+- `spaceMembership = .ownLocal` (hoặc `.owner` nếu đã có share)
+- `onboardingCompleted = true`
+- MainTab hiển thị **đúng** data private đã load
+
+### 2B.5 Unhappy (tóm tắt — chi tiết §5.19+)
+
+- Không có data + không iCloud → Error + Quay Welcome  
+- Có iCloud nhưng zone trống → Error `restoreNotFound`  
+- Timeout sync → Error + Thử lại  
+- **Cấm** mở MainTab empty như thể đã restore thành công  
 
 ---
 
-### Step A3 — Ngày bắt đầu
+## 3. Path — Nhập từ link được mời (shared-only)
 
-**File:** `OnboardingStartDateView.swift`
+### 3.0 Import session — cam kết path
 
-#### UI
+Khi user bấm **Nhập từ link được mời** (và qua confirm §3.3 nếu có local data):
 
-- Title: “Ngày bắt đầu của hai bạn”
-- `DatePicker` graphical, tint pink, trong card corner 16
-- Primary: “Lưu ngày”
-- Tertiary: “Để sau”
+```
+importSessionActive = true
+onboardingChoice = .importFromLink
+activeDataSource = .sharedInvite   // intent — chưa được đọc private
+importPhase = .awaitingAccept
+```
 
-#### Actions
+**Import session** kết thúc chỉ khi:
 
-| Control | Action |
-|---------|--------|
-| Lưu ngày | `save(startDate, isSet: true)` → A4 hoặc Done nếu Solo |
-| Để sau | `isSet = false` → tiếp |
+| Kết thúc | Điều kiện |
+|----------|-----------|
+| **Success** | `importPhase == .sharedReady` → MainTab shared-only |
+| **User abort** | Bấm **Quay lại Welcome** → `importSessionActive = false` |
+| **Không** | Shared fail, timeout, empty local — **không** được coi là kết thúc session |
 
----
+#### State machine `importPhase`
 
-### Step A4 — Mời partner (Owner only)
+```
+awaitingAccept          // JoinGuide — chờ user Accept trên OS
+  ↓ [Tôi đã Accept — tiếp tục]
+accepting               // gọi acceptShareIfPending()
+  ↓ success
+probingSharedZone       // poll CoupleSpace trong SHARED store
+  ↓ found
+hydratingSharedData     // zone OK; có thể 0 records — vẫn shared-only
+  ↓ zone stable (CoupleSpace tồn tại)
+sharedReady             // → MainTab (shared store only)
+  ↓ fail ở bất kỳ bước nào
+failed(error)           // SharedImportErrorView — KHÔNG MainTab, KHÔNG local
+```
 
-**File:** `OnboardingInviteView.swift` / `InvitePartnerViewModel`
+#### Phân biệt “fail” vs “đang sync”
 
-Đây là bước **quan trọng nhất** thay Settings-only invite.
+| Trạng thái | Shared store có CoupleSpace? | UI | Fallback local? |
+|------------|------------------------------|-----|-------------------|
+| **Fail** | Không | `SharedImportErrorView` | **Không** |
+| **Hydrating** | Có, records = 0 hoặc chưa đủ | MainTab + banner sync **hoặc** `SharedImportLoadingView` full-screen | **Không** |
+| **Ready** | Có, có data | MainTab bình thường | **Không** |
 
-#### UI
+**Khuyến nghị MVP:** zone OK nhưng 0 records → vẫn cho MainTab **nếu** `CoupleSpace` đã có trong shared store; banner “Đang đồng bộ…”. Zone **không** có → **không** MainTab.
+
+### 3.1 Luồng tổng
+
+```
+Welcome [Nhập từ link]
+  → (nếu có local) LocalDataAbandonConfirm
+  → importSessionActive = true
+  → JoinGuideView
+  → (OS Accept)
+  → SharedImportLoadingView (poll + hydrate)
+       ├─ success → JoinResultView success → optional setup → MainTab (shared ONLY)
+       └─ fail    → SharedImportErrorView (retry / Quay Welcome) — NO local
+```
+
+### 3.2 JoinGuideView
+
+```
+Title: Nhập từ link được mời
+Body:
+  1. Mở link người ấy gửi (Messages, Zalo, …)
+  2. Nhấn Accept / Chấp nhận trên màn hình iOS
+  3. Quay lại MemoryBox và nhấn nút bên dưới
+
+[Tôi đã Accept — tiếp tục]     ← Primary 52h → §3.5
+[Mở link từ clipboard]         ← optional
+[Quay lại]                       ← hủy importSession → Welcome
+```
+
+### 3.3 Đã có local data — confirm abandon
+
+(Giữ nguyên copy alert §3.3 cũ.)
+
+Sau **Tiếp tục nhập link**:
+
+- `hasAcknowledgedLocalAbandon = true`
+- `importSessionActive = true`
+- **Chưa** set `onboardingCompleted = true`
+- Local **không** hiển thị từ bước này trở đi cho đến khi user Quay Welcome + chọn Tự thiết lập
+
+### 3.4 SharedImportLoadingView (mới — bắt buộc)
+
+**File:** `SharedImportLoadingView.swift`  
+Hiện sau user bấm **Tôi đã Accept — tiếp tục**.
 
 ```
 ┌─────────────────────────────────┐
-│  progress                       │
-│  Mời người ấy                   │
-│  Gửi link để cùng một không     │
-│  gian kỷ niệm trên iCloud.      │
+│     ProgressView + heart        │
+│  Đang tải không gian chia sẻ    │
+│  Vui lòng giữ mạng ổn định.     │
 │                                 │
-│  ┌───────────────────────────┐  │
-│  │  status icon 40           │  │
-│  │  Đang tạo link… / Ready   │  │
-│  │  hoặc lỗi + Thử lại       │  │
-│  └───────────────────────────┘  │
-│                                 │
-│  ┌───────────────────────────┐  │
-│  │  Chia sẻ link             │  │  ← Primary, ShareLink / sheet
-│  └───────────────────────────┘  │
-│  ┌───────────────────────────┐  │
-│  │  Sao chép link            │  │  ← Secondary
-│  └───────────────────────────┘  │
-│                                 │
-│  Partner cần:                   │
-│  • iPhone + MemoryBox           │
-│  • iCloud đã đăng nhập          │
-│  • Mở link và nhấn Accept       │
-│                                 │
-│  ┌───────────────────────────┐  │
-│  │   Vào trang chủ           │  │  ← sau khi có link hoặc skip
-│  └───────────────────────────┘  │
-│     Mời sau trong Cài đặt       │
+│  (substatus text thay đổi)      │
 └─────────────────────────────────┘
 ```
 
-#### State machine UI
+Substatus theo phase:
 
-| State | UI |
-|-------|-----|
-| `preparing` | ProgressView + “Đang tạo link…”; disable share/copy |
-| `ready(url)` | hiện 2 nút share/copy; Primary “Vào trang chủ” enabled |
-| `failed(message)` | error text + “Thử lại” |
-| `skipped` | membership `.soloPendingInvite` |
+| Phase | Text |
+|-------|------|
+| `accepting` | Đang xác nhận lời mời… |
+| `probingSharedZone` | Đang tìm không gian chia sẻ… |
+| `hydratingSharedData` | Đang đồng bộ dữ liệu từ iCloud… |
 
-#### Behavior
+**Poll policy:**
 
-1. `onAppear` / `.task` → `prepareCoupleShare()` (reuse logic Persistence).
-2. Success → `spaceMembership = .owner`, lưu URL cache local để Settings hiện lại.
-3. ShareLink dùng system share sheet (Messages, etc.).
-4. Copy → `UIPasteboard` + toast “Đã sao chép” 1.5s.
-5. “Vào trang chủ” → `onboardingCompleted = true` → MainTab.
-6. “Mời sau” → complete onboarding, badge/dot trên Settings & Home banner “Chưa mời partner”.
+- Interval: 1s, max **45s** cho probe zone
+- Sau 45s không có CoupleSpace → `failed(.sharedZoneNotFound)` → §3.7
+- Có zone → `sharedReady` hoặc chuyển MainTab + banner (§5.11)
 
-#### Không làm
+**Trong lúc loading:** Back gesture disabled hoặc confirm “Hủy nhập link?” → Quay Welcome.
 
-- Không dùng `UICloudSharingController` (đã lỗi trước đó).
-- Không block vào Home nếu tạo link fail — cho skip + retry trong Settings.
+### 3.5 Nút “Tôi đã Accept — tiếp tục”
 
----
+1. `importPhase = .accepting`
+2. Present `SharedImportLoadingView`
+3. `acceptShareIfPending()` + `probeSharedCoupleSpace()`
+4. **Chỉ** đọc `MemoryStore` APIs scoped **shared store**
+5. Success path → §3.6  
+6. Fail → §3.7 (**không** đọc private)
 
-### Step A5 — Done (Owner / Solo)
-
-**File:** `OnboardingDoneView.swift`
+### 3.6 JoinResultView — Success
 
 ```
-┌─────────────────────────────────┐
-│     ♥ success animation         │
-│     Tất cả đã sẵn sàng          │
-│     short subtitle theo path    │
-│  ┌───────────────────────────┐  │
-│  │     Bắt đầu               │  │
-│  └───────────────────────────┘  │
-└─────────────────────────────────┘
-```
-
-- Owner subtitle: “Khi người ấy Accept, dữ liệu sẽ đồng bộ.”
-- Solo: “Bạn có thể mời partner bất cứ lúc nào trong Cài đặt.”
-- Tap Bắt đầu → MainTab Home.
-
----
-
-## 5. Flow B — Join via invite link (Participant)
-
-### Step B1 — Join explain
-
-**File:** `JoinExplainView.swift`
-
-#### UI
-
-```
-Title: Tham gia không gian có sẵn
-Body: Mở link mời từ Messages / Notes.
-      Nếu bạn vừa bấm link và Accept,
-      kéo xuống để làm mới hoặc chờ vài giây.
-
-[Tôi đã Accept — kiểm tra]
-[Mở hướng dẫn]
-[Quay lại]
-```
-
-#### “Tôi đã Accept — kiểm tra”
-
-1. Show loading.
-2. `MemoryStore.refreshMembership()` / fetch shared CoupleSpace.
-3. Nếu thấy shared space → B2 success path.
-4. Nếu chưa → alert “Chưa thấy không gian chia sẻ. Hãy mở lại link mời và Accept, đảm bảo cùng Apple ID đã Accept.”
-
-### Step B2 — System accept (OS)
-
-Không có UI in-app cho CloudKit accept sheet — đó là UI hệ thống.
-
-App phải:
-
-1. Implement `AppDelegate` + `SceneDelegate` accept (đã có).
-2. Sau accept success → post notification `.coupleShareDidAccept(success:error:)`.
-3. `OnboardingCoordinator` / `RootCoordinator` subscribe → present `JoinResultView`.
-
-### Step B3 — JoinResultView (bắt buộc có)
-
-**File:** `JoinResultView.swift`
-
-#### Success
-
-```
-Title: Đã tham gia!
-Body: Bạn đang ở không gian chia sẻ với người ấy.
-Primary: Tiếp tục thiết lập hồ sơ → WhoAmI (nếu chưa) → Profile → Done
+Title: Đã tham gia không gian chia sẻ
+Body: Dữ liệu của hai bạn sẽ hiển thị từ iCloud.
+Primary: Vào trang chủ
 ```
 
 Set:
 
+- `importPhase = .sharedReady`
+- `importSessionActive = false`
+- `activeDataSource = .sharedInvite` (enforce trong `CoupleDataRoutingService`)
 - `spaceMembership = .participant`
-- `onboardingCompleted` chỉ true sau WhoAmI tối thiểu (role bắt buộc)
+- `onboardingCompleted = true`
 
-#### Failure
+**Vào trang chủ:** `MemoryStore.load*` **chỉ** từ shared active store. Verify bằng unit/integration: không gọi private fetch khi `activeDataSource == .sharedInvite`.
+
+### 3.7 SharedImportErrorView (mới — bắt buộc)
+
+**File:** `SharedImportErrorView.swift`
 
 ```
-Title: Không tham gia được
-Body: {localized error}
-Primary: Thử mở lại link
-Secondary: Tiếp tục một mình
+┌─────────────────────────────────┐
+│  ⚠️ icon                        │
+│  Không tải được không gian      │
+│  chia sẻ                        │
+│                                 │
+│  {errorMessage user-friendly}   │
+│                                 │
+│  ┌───────────────────────────┐  │
+│  │       Thử lại             │  │  ← Primary — quay lại §3.5
+│  └───────────────────────────┘  │
+│  ┌───────────────────────────┐  │
+│  │   Quay lại Welcome        │  │  ← Secondary — abort session
+│  └───────────────────────────┘  │
+└─────────────────────────────────┘
 ```
 
-### Step B4 — WhoAmI + Profile (Participant)
+| Nút | Hành vi |
+|-----|---------|
+| **Thử lại** | `importPhase = .awaitingAccept` hoặc `.probingSharedZone`; show Loading lại; **vẫn shared-only intent** |
+| **Quay lại Welcome** | `importSessionActive = false`; `importPhase = .idle`; về Welcome — user **chủ động** chọn Tự thiết lập nếu muốn local |
 
-Giống A1–A2 nhưng copy khác:
+**Không có** nút:
 
-- “Trong không gian này, bạn là…”
-- Default gợi ý: nếu Owner thường là `.first`, Participant chọn `.second` — **vẫn cho đổi**, không lock.
+- “Dùng dữ liệu trên máy”
+- “Bỏ qua” vào MainTab
+- Auto redirect Home với local data
 
-**Conflict rule:** nếu cả 2 chọn cùng role → tin nhắn “của tôi” có thể lệch. Mitigate:
+#### Error codes → copy
 
-- Lần sync đầu: nếu phát hiện 2 device cùng `myRole`, hiện banner Settings “Hai bạn đang cùng một vai — đổi trong Cài đặt”.
+| Code | Message |
+|------|---------|
+| `sharedZoneNotFound` | Chưa thấy không gian chia sẻ. Hãy mở lại link, nhấn Accept, rồi thử lại. |
+| `acceptFailed` | Không xác nhận được lời mời. Kiểm tra iCloud và thử lại. |
+| `networkUnavailable` | Cần kết nối mạng để tải không gian chia sẻ. |
+| `icloudUnavailable` | Cần đăng nhập iCloud để tham gia link mời. |
+| `shareRevoked` | Link không còn hiệu lực. Nhờ người ấy gửi link mới. |
+| `hydrationTimeout` | Đồng bộ quá lâu. Thử lại hoặc kiểm tra mạng. |
 
-### Step B5 — Done (Participant)
+### 3.8 JoinResultView — Failure (deprecated)
 
-Không hiện Invite step. Subtitle: “Kỷ niệm và tin nhắn sẽ đồng bộ qua iCloud.”
+Thay bằng **`SharedImportErrorView`** thống nhất. Không dùng flow failure riêng có nút “Tự thiết lập” ngầm.
 
 ---
 
-## 6. Flow C — Solo / invite later
-
-1. Welcome → tertiary.
-2. Alert:
+## 4. Root coordinator
 
 ```
-Title: Dùng một mình trước?
-Body: Bạn vẫn tạo kỷ niệm trên máy này.
-      Khi sẵn sàng, mời partner trong Cài đặt.
-[Tiếp tục một mình] [Hủy]
+MemoryBoxApp
+ └─ RootCoordinatorView
+      ├─ if !onboardingCompleted → Welcome + path subflow
+      ├─ else if pendingJoinResult → JoinResultView (modal)
+      └─ else → MainTabView
 ```
 
-3. WhoAmI → Profile → StartDate → Done (skip Invite).
-4. `spaceMembership = .soloPendingInvite` hoặc `.localOnly`.
-5. Home hiện `InvitePartnerBanner` (dismissible, không hiện lại trong 7 ngày nếu dismiss).
+### 4.1 State lưu trữ
+
+| Field | Type | Ghi chú |
+|-------|------|---------|
+| `onboardingCompleted` | Bool | Gate MainTab |
+| `onboardingChoice` | `.setupOwn` \| `.restoreOwn` \| `.importFromLink` | Lần chọn Welcome |
+| `importSessionActive` | Bool | **true** = path nhập link; cấm private UI |
+| `restoreSessionActive` | Bool | **true** = path tải dữ liệu cũ; chưa success thì cấm MainTab |
+| `importPhase` | enum §3.0 | Track accept/probe/hydrate/fail |
+| `restorePhase` | enum §2B.0 | Track probe/sync/ready/fail |
+| `activeDataSource` | `.ownPrivate` \| `.sharedInvite` | Store UI đang đọc |
+| `spaceMembership` | `.ownLocal` \| `.ownSharedPendingPartner` \| `.owner` \| `.participant` | Trạng thái share |
+| `myRole` | `.first` \| `.second` | User chọn |
+| `hasAcknowledgedLocalAbandon` | Bool | User đã confirm §3.3 |
+
+**Enforcement:** `CoupleDataRoutingService.loadMemories()` (và mọi load) **assert** hoặc guard:
+
+```swift
+if importSessionActive || activeDataSource == .sharedInvite {
+  return sharedStoreOnly(...)   // never private fallback
+}
+if restoreSessionActive && restorePhase != .ready {
+  // do not serve MainTab loads; coordinator shows Loading/Error
+}
+if activeDataSource == .ownPrivate { return privateStoreOnly(...) }
+```
+
+Persist: `UserDefaults` (device) + mirror `AppSettings` khi có CoupleSpace (chỉ field không gây conflict cross-device).
+
+### 4.2 Share accept xen giữa lúc mở app
+
+| Lúc | Hành vi |
+|-----|---------|
+| Chưa chọn Welcome, OS gọi accept | Coi như user chọn **importFromLink**; nếu có local data → show §3.3 confirm **trước** khi finalize |
+| Đang JoinGuide | Tiếp tục poll → Result |
+| Đã MainTab + own data | §5.8 — confirm abandon local |
 
 ---
 
-## 7. Post-onboarding surfaces
+## 5. Unhappy cases (bắt buộc implement)
 
-### 7.1 Home — InvitePartnerBanner
+Mỗi case: **Trigger → UI → Hành vi hệ thống → Copy gợi ý**.
 
-Chỉ khi `spaceMembership == .soloPendingInvite || (.owner && !partnerHasJoinedHeuristic)`.
+### 5.1 iCloud chưa đăng nhập / không available
 
-```
-┌─────────────────────────────────────┐
-│ ♥  Mời người ấy đồng bộ kỷ niệm     │
-│     [Mời ngay]            [Đóng]    │
-└─────────────────────────────────────┘
-```
+| | |
+|--|--|
+| **Trigger** | User **Nhập từ link** hoặc Owner bấm **Mời** trong Settings |
+| **UI** | Sheet full hoặc alert |
+| **Title** | Cần đăng nhập iCloud |
+| **Body** | MemoryBox cần iCloud để đồng bộ và tham gia link mời. |
+| **Primary** | Mở Cài đặt |
+| **Secondary** | Đóng / Quay lại |
+| **System** | Không gọi `prepareCoupleShare` / không finalize accept |
+| **Tự thiết lập** | **Vẫn cho** vào app offline/local (không cần iCloud) |
 
-- Height ~ **72**, margin horizontal 24, corner 12.
-- **Mời ngay** → present `InvitePartnerSheet` (reuse OnboardingInvite content).
-- Partner joined heuristic: shared participants count > 1 **hoặc** có message/memory từ role kia.
+### 5.2 Tạo link share thất bại (Owner)
 
-### 7.2 Settings — Đồng bộ cặp đôi (viết lại)
+| | |
+|--|--|
+| **Trigger** | `prepareCoupleShare` error / timeout / hang |
+| **UI** | Inline error trong Invite sheet + nút **Thử lại** |
+| **System** | `spaceMembership` giữ `.ownLocal`; user vẫn dùng data riêng |
+| **Không** | Block toàn app |
 
-Section bắt buộc có:
+### 5.3 Accept xong nhưng chưa thấy shared zone (CoupleSpace)
 
-| Row | Owner | Participant |
-|-----|-------|-------------|
-| Trạng thái | “Bạn là chủ không gian” | “Đã tham gia không gian chia sẻ” |
-| iCloud | status text | status text |
-| Mời / Sao chép link | hiện | **ẩn** hoặc disabled + footnote |
-| Thành viên | list CKShare participants nếu fetch được | “Bạn + Owner” |
-| Rời không gian | N/A hoặc Stop Sharing | **Rời khỏi chia sẻ** |
-| Vai trò của tôi | picker First/Second | picker |
+| | |
+|--|--|
+| **Trigger** | Probe 45s không có `CoupleSpace` trong **shared store** |
+| **UI** | `SharedImportErrorView` — **không** alert rồi về Home |
+| **Title** | Không tải được không gian chia sẻ |
+| **Body** | Chưa thấy dữ liệu được mời. Mở lại link, nhấn Accept, rồi Thử lại. |
+| **Primary** | Thử lại |
+| **Secondary** | Quay lại Welcome |
+| **System** | `importSessionActive` vẫn true cho đến Quay Welcome; **không** `onboardingCompleted`; **không** đọc private |
+| **Cấm** | Fallback local; vào MainTab trống bằng private data |
 
-**Leave share (Participant):**
+### 5.4 Accept thất bại (CloudKit error)
 
-1. Confirm destructive alert.
-2. Remove share / purge local shared store membership theo API CloudKit phù hợp.
-3. Reset `onboardingCompleted`? → **Không**. Chỉ set `spaceMembership = .localOnly`, clear shared data local theo policy (xem §9).
+| | |
+|--|--|
+| **Trigger** | `acceptShareInvitation` error |
+| **UI** | `SharedImportErrorView` |
+| **Primary** | Thử lại |
+| **Secondary** | Quay lại Welcome |
+| **System** | Giữ import session; local vẫn ẩn nếu đã confirm abandon |
+| **Cấm** | Nút “Tự thiết lập” trên màn lỗi (tránh fallback ngầm). User phải về Welcome **chủ động** chọn. |
 
-**Stop sharing (Owner):**
+### 5.5 Link hết hạn / sharing stopped
 
-1. Confirm: partner mất quyền truy cập.
-2. `CKModifyRecords` / unshare CoupleSpace.
-3. Data owner giữ ở private.
+| | |
+|--|--|
+| **Trigger** | CloudKit share revoked / invalid URL |
+| **UI** | `SharedImportErrorView`, code `shareRevoked` |
+| **Body** | Link không còn hiệu lực. Nhờ người ấy gửi link mới. |
+| **Primary** | Quay lại Welcome |
+| **Secondary** | Thử lại (optional) |
+| **Cấm** | Fallback local |
 
-### 7.3 Accept khi đã ở MainTab
+### 5.6 User có local data, chọn Nhập link, bấm Hủy ở confirm
 
-Nếu user đã onboarding xong rồi mới Accept link:
+| | |
+|--|--|
+| **Trigger** | Alert §3.3 → **Quay lại** |
+| **UI** | Về Welcome |
+| **System** | Không đổi `activeDataSource`; local vẫn nguyên |
 
-- Present modal `JoinResultView`.
-- Nếu đang `.owner` / đã có private data: hiện **conflict sheet** §8.
+### 5.7 User chọn Tự thiết lập
+
+| | |
+|--|--|
+| **Trigger** | `choice == setupOwn` |
+| **UI** | Optional setup → MainTab (có thể trống) |
+| **System** | `activeDataSource = .ownPrivate` — **không** fail nếu chưa có data |
+
+### 5.19 Tải dữ liệu cũ — không tìm thấy
+
+| | |
+|--|--|
+| **Trigger** | Probe + sync 45s không đủ success criteria §2B.0 |
+| **UI** | `RestoreDataErrorView` code `restoreNotFound` |
+| **Primary** | Thử lại |
+| **Secondary** | Quay lại Welcome |
+| **System** | `onboardingCompleted` vẫn false; **không** MainTab |
+| **Cấm** | Mở Home trống như thành công |
+
+### 5.20 Tải dữ liệu cũ — iCloud / mạng lỗi
+
+| | |
+|--|--|
+| **Trigger** | Cần CloudKit private nhưng account/network fail |
+| **UI** | `RestoreDataErrorView` (`icloudUnavailable` / `networkUnavailable`) |
+| **Primary** | Thử lại |
+| **Secondary** | Quay lại Welcome (rồi có thể chọn Tự thiết lập offline) |
+| **System** | Không fallback silent sang empty MainTab |
+
+### 5.21 Tải dữ liệu cũ — timeout hydrate
+
+| | |
+|--|--|
+| **Trigger** | Sync quá 45s chưa có data hợp lệ |
+| **UI** | `RestoreDataErrorView` `hydrationTimeout` |
+| **Primary** | Thử lại |
+| **Secondary** | Quay lại Welcome |
+
+### 5.22 Tải dữ liệu cũ — user hủy giữa loading
+
+| | |
+|--|--|
+| **Trigger** | Confirm hủy trên Loading |
+| **UI** | Welcome |
+| **System** | `restoreSessionActive = false` |
+
+### 5.8 Đã dùng own data (onboarding xong), sau đó Accept link mới
+
+| | |
+|--|--|
+| **Trigger** | User đã MainTab với own data; mở link partner |
+| **UI** | **Cùng** confirm §3.3 (abandon local) |
+| **Confirm** | Chuyển `activeDataSource = .sharedInvite`; local abandoned |
+| **Cancel** | Ở lại own data; ignore share metadata |
+
+### 5.9 Đã participant, mở link khác / bấm Tự thiết lập
+
+| | |
+|--|--|
+| **Trigger** | `spaceMembership == .participant` |
+| **UI** | Alert |
+| **Title** | Bạn đang trong không gian chia sẻ |
+| **Body** | Rời không gian hiện tại trong Cài đặt trước khi dùng dữ liệu khác. |
+| **Primary** | Mở Cài đặt |
+| **System** | Không switch store silently |
+
+### 5.10 Owner đã có share, partner chưa join — user bấm Nhập link (nhầm vai)
+
+| | |
+|--|--|
+| **Trigger** | Owner device, user chọn Nhập link (sai flow) |
+| **UI** | Alert |
+| **Body** | Bạn đang là người tạo không gian. Hãy mời người ấy bằng link trong Cài đặt, không cần nhập link. |
+| **Primary** | Mở mời |
+| **Secondary** | Đóng |
+
+### 5.11 Shared zone OK nhưng records chưa về (hydrating)
+
+| | |
+|--|--|
+| **Trigger** | `CoupleSpace` có trong shared store; memories/messages count = 0 |
+| **UI** | **MainTab allowed** — đây là shared empty, **không phải fail** |
+| **Banner** | “Đang đồng bộ dữ liệu từ iCloud…” + pull-to-refresh |
+| **System** | `activeDataSource = .sharedInvite` **bắt buộc**; reload on remote change |
+| **Timeout 3 phút** | Chuyển `SharedImportErrorView` code `hydrationTimeout` — **vẫn không** fallback local |
+| **Retry từ timeout** | Poll shared lại; **không** chuyển store |
+
+### 5.11b User thấy data “cũ” sau khi chọn import — bug class
+
+| | |
+|--|--|
+| **Trigger** | QA thấy local memories sau import path |
+| **Root cause thường gặp** | `activeCoupleStore()` fallback private khi shared empty |
+| **Fix bắt buộc** | Khi `activeDataSource == .sharedInvite`, **never** query private store for UI |
+| **Acceptance** | Automated test: import path + empty shared → UI shows 0 items, not local count |
+
+### 5.12 Không mạng
+
+| | |
+|--|--|
+| **Tự thiết lập** | Cho dùng local bình thường |
+| **Nhập link / Mời** | Block với alert “Cần kết nối mạng để tham gia / chia sẻ.” |
+
+### 5.13 User thoát giữa onboarding
+
+| | |
+|--|--|
+| **Trigger** | Kill app trước Done |
+| **System** | Lần mở sau: `onboardingCompleted == false` → Welcome lại |
+| **Nếu đã chọn path** | Có thể restore `onboardingChoice` draft (optional) |
+
+### 5.14 Reinstall / máy mới — participant
+
+| | |
+|--|--|
+| **Trigger** | Cài lại app, cùng Apple ID đã từng Accept |
+| **UI** | Welcome → user chọn **Nhập từ link** hoặc detect shared zone restore |
+| **System** | CloudKit restore shared store; không cần local cũ |
+| **Happy** | JoinGuide → “Tôi đã Accept” hoặc auto-detect shared CoupleSpace |
+
+### 5.15 Reinstall — owner
+
+| | |
+|--|--|
+| **Trigger** | Cài lại, private data restore từ iCloud |
+| **User chọn Tự thiết lập** | §5.7 — dùng data restore |
+| **User chọn Nhập link** | §3.3 confirm nếu có restored private data |
+
+### 5.16 Clipboard không phải link hợp lệ
+
+| | |
+|--|--|
+| **Trigger** | “Mở link từ clipboard” |
+| **UI** | Toast: “Không tìm thấy link mời hợp lệ.” |
+
+### 5.17 Hai người cùng chọn một `myRole`
+
+| | |
+|--|--|
+| **Trigger** | Sync xong, cả 2 device `myRole == .first` (hoặc `.second`) |
+| **UI** | Banner Settings (non-blocking) |
+| **Body** | Hai bạn đang cùng một vai. Đổi trong Cài đặt để tin nhắn hiển thị đúng. |
+
+### 5.18 Rời không gian (participant) — unhappy
+
+| | |
+|--|--|
+| **Trigger** | Rời thất bại (network) |
+| **UI** | Alert + retry |
+| **Success** | `activeDataSource = .ownPrivate`; local abandoned/shared cleared khỏi UI; Welcome **không** bắt buộc hiện lại — vào MainTab own trống hoặc local cũ nếu còn |
 
 ---
 
-## 8. Conflict: đã có data riêng rồi join shared
+## 6. Post-onboarding UI
 
-**File:** `ShareConflictView.swift`
+### 6.1 Settings — Đồng bộ
+
+| Trạng thái | Hiển thị |
+|------------|----------|
+| `.ownLocal` | “Dữ liệu trên máy này” + **Mời người ấy** |
+| `.ownSharedPendingPartner` / `.owner` | “Đang chờ người ấy tham gia” + copy link |
+| `.participant` | “Đã tham gia không gian chia sẻ” + **Rời không gian** (không có Mời) |
+
+### 6.2 Home banner (own, chưa mời)
+
+Chỉ khi `spaceMembership == .ownLocal` và chưa dismiss:
 
 ```
-Title: Bạn đang có dữ liệu riêng
-Body: Tham gia link sẽ dùng không gian chia sẻ.
-      Dữ liệu chỉ có trên máy này có thể không
-      gộp tự động.
-
-[Dùng không gian chia sẻ]   ← primary
-[Giữ dữ liệu máy này]       ← cancel accept / ignore share
+Mời người ấy đồng bộ kỷ niệm   [Mời ngay] [✕]
 ```
-
-Phase 1 (MVP): **không merge**. Chọn shared → active store = shared; private data giữ im (không xóa), không hiện trên UI chính.
-
-Phase 2 (sau): optional “Mang kỷ niệm sang không gian chia sẻ”.
 
 ---
 
-## 9. Data policies
+## 7. Decision matrix (QA nhanh)
 
-| Event | Policy |
-|-------|--------|
-| Owner tạo share | Private CoupleSpace là root share; backfill children |
-| Participant accept | Shared store active; role participant |
-| Solo | Private only; có thể tạo share sau |
-| Leave share | Shared UI data ẩn; không xóa private cũ |
-| Reinstall | Rely CloudKit restore; onboardingCompleted sync qua `AppSettings` nếu có field; fallback local UserDefaults key `memoryBox.onboardingCompleted` |
+| User chọn | Load kết quả | UI |
+|-----------|--------------|-----|
+| Tự thiết lập | (không bắt buộc có data) | MainTab private (có thể trống) |
+| Tải dữ liệu cũ | Tìm thấy data | MainTab private với data cũ |
+| Tải dữ liệu cũ | Không tìm thấy / timeout / lỗi | **RestoreDataErrorView** — retry / Welcome — **NOT MainTab** |
+| Nhập link | Zone OK | Shared only |
+| Nhập link | Zone fail | **SharedImportErrorView** — **NOT private** |
+| Nhập link | Zone OK, records 0 | Shared empty + banner |
+| Restore/Import fail → Quay Welcome → chọn lại | — | Path mới |
 
-**Onboarding flag storage:**
+### Anti-patterns (test phải FAIL)
 
-- Primary: `AppSettings.onboardingCompleted` (sync được giữa device **cùng** space — cẩn thận: participant device khác nhau).
-- Device-local mirror: `UserDefaults` `memoryBox.onboardingCompleted` để gate UI trước khi CloudKit về.
-
-Rule: **OR** của hai nguồn khi đọc; khi complete → ghi cả hai.
+- [ ] Import fail → Home hiện private memories
+- [ ] Restore fail → Home trống với `onboardingCompleted = true`
+- [ ] Restore fail → tự chuyển sang Tự thiết lập không hỏi
+- [ ] Error screen có nút “Vào trang chủ” bỏ qua load
+- [ ] Import: `activeCoupleStore()` trả private khi shared empty
 
 ---
 
-## 10. Coordinator & ViewModel map (implement)
+## 8. File map (implement sau)
 
 ```
 Views/Onboarding/
-  OnboardingCoordinatorView.swift      // owns path + step
   WelcomeView.swift
-  WhoAmIView.swift
-  OnboardingProfileView.swift
-  OnboardingStartDateView.swift
-  OnboardingInviteView.swift
-  OnboardingDoneView.swift
-  JoinExplainView.swift
+  RestoreDataLoadingView.swift       // NEW — tải dữ liệu cũ
+  RestoreDataErrorView.swift         // NEW — retry / Quay Welcome
+  JoinGuideView.swift
+  SharedImportLoadingView.swift
+  SharedImportErrorView.swift
   JoinResultView.swift
-  ShareConflictView.swift
-  Components/
-    OnboardingProgressBar.swift
-    OnboardingCTAButton.swift
-    RolePickCard.swift
+  LocalDataAbandonConfirmView.swift
+  OnboardingOptionalSetupView.swift
 
-ViewModels/Onboarding/
-  OnboardingCoordinatorViewModel.swift
-  WelcomeViewModel.swift
-  WhoAmIViewModel.swift
-  OnboardingProfileViewModel.swift
-  OnboardingStartDateViewModel.swift
-  InvitePartnerViewModel.swift
-  JoinFlowViewModel.swift
-
-Domain/Services/
-  CoupleShareService.swift             // wrap prepare/accept/leave (tách khỏi Persistence God-file dần)
-  OnboardingStore.swift                // flags + path persistence
-```
-
-`ContentView` **không** chứa onboarding logic. Root:
-
-```swift
-RootView {
-  if vm.showOnboarding { OnboardingCoordinatorView(...) }
-  else { MainTabView(...) }
-}
+Services/
+  CoupleDataRoutingService.swift
+  OnboardingStore.swift
+  CoupleShareService.swift
+  CoupleRestoreService.swift         // probe local + CloudKit private restore
 ```
 
 ---
 
-## 11. Analytics / logging (dev)
+## 9. Implementation order (Codex)
 
-Mỗi bước log `MemoryLog.share`:
-
-- `onboarding_path_selected`
-- `icloud_status`
-- `share_prepare_success/fail`
-- `share_accept_success/fail`
-- `onboarding_completed`
-
-Không gửi PII (tên, ảnh).
+1. `OnboardingStore` + `CoupleDataRoutingService` (§0)
+2. Welcome **3 nút** + RootCoordinator gate
+3. Path **Tự thiết lập** (§2)
+4. Path **Tải dữ liệu cũ** — Loading + Error (§2B) — **no MainTab on fail**
+5. Path **Nhập link** — Loading + Error shared-only (§3)
+6. Settings invite + §6
+7. Unhappy §5 còn lại
 
 ---
 
-## 12. Acceptance criteria (QA)
+## 10. Copy chuẩn (tiếng Việt)
 
-### Create path
-
-- [ ] User mới thấy Welcome, không vào Home trước.
-- [ ] Create bị chặn nếu không iCloud, có sheet hướng dẫn.
-- [ ] Chọn role bắt buộc.
-- [ ] Invite tạo được URL, copy/share hoạt động.
-- [ ] Skip invite → Home + banner mời.
-- [ ] Settings vẫn mời lại được.
-
-### Join path
-
-- [ ] Accept link hiện JoinResult success/fail (không im lặng).
-- [ ] Participant không thấy nút “Mời…” như Owner.
-- [ ] Sau join, memories/messages của Owner xuất hiện sau sync (có loading empty state rõ).
-
-### Solo
-
-- [ ] Vào được app không cần share.
-- [ ] Banner mời có thể dismiss và mời sau.
-
-### Regression
-
-- [ ] Dark/Light theo Settings appearance vẫn đúng.
-- [ ] Không regress collage timeline / delete memory trên detail.
+| Key | Text |
+|-----|------|
+| welcome_primary | **Tự thiết lập dữ liệu** |
+| welcome_restore | **Tải dữ liệu cũ** |
+| welcome_secondary | **Nhập từ link được mời** |
+| abandon_local_title | **Dữ liệu trên máy này sẽ không dùng nữa** |
+| abandon_local_continue | **Tiếp tục nhập link** |
+| join_success_title | **Đã tham gia không gian chia sẻ** |
+| join_fail_title | **Không tải được không gian chia sẻ** |
+| restore_loading_title | **Đang tải dữ liệu cũ** |
+| restore_fail_title | **Không tải được dữ liệu cũ** |
+| import_loading_title | **Đang tải không gian chia sẻ** |
+| import_retry | **Thử lại** |
+| import_back_welcome | **Quay lại Welcome** |
 
 ---
 
-## 13. Implementation order (cho AI)
+## 11. Acceptance criteria
 
-1. **Scaffold** folder Onboarding + ViewModels + `OnboardingStore` flags (chưa nối CloudKit mới).
-2. **Root gate** — Welcome → Solo path end-to-end (không share).
-3. **WhoAmI + Profile + StartDate** wire `MemoryStore`.
-4. **Invite step** reuse `prepareCoupleShare` + ShareInviteSheet UI.
-5. **JoinResult** + wire accept notifications.
-6. **Settings rewrite** membership / leave.
-7. **Conflict sheet** + Home banner.
-8. **Cleanup** tách `CoupleShareService` khỏi `PersistenceController` dần (không big-bang).
-
-Mỗi PR nhỏ, đúng Karpathy guidelines: không đụng code ngoài scope.
-
----
-
-## 14. Copy tiếng Việt (chuẩn)
-
-Dùng đúng các câu trong spec này để UI đồng nhất. Không viết lại marketing copy trừ khi được hỏi.
-
-Welcome primary: **Tạo không gian cặp đôi**  
-Welcome secondary: **Tôi có link mời**  
-Welcome tertiary: **Tiếp tục một mình trước**  
-Invite primary share: **Chia sẻ link**  
-Invite copy: **Sao chép link**  
-Done owner: **Khi người ấy Accept, dữ liệu sẽ đồng bộ.**  
-Join success: **Đã tham gia!**
+- [ ] Welcome có **đúng 3 lựa chọn**
+- [ ] Tự thiết lập → MainTab private (trống OK)
+- [ ] Tải dữ liệu cũ + có data → MainTab với data cũ
+- [ ] Tải dữ liệu cũ + fail → **RestoreDataErrorView**, **không** MainTab; Thử lại / Quay Welcome
+- [ ] Nhập link fail → **SharedImportErrorView**, **không** private
+- [ ] Nhập link success → chỉ shared
+- [ ] Quay Welcome từ lỗi → chọn được option khác
+- [ ] Settings **Mời** sau khi own/restore success
+- [ ] Participant: Rời không gian; không Mời

@@ -179,6 +179,18 @@ enum MessageSenderRole: String, Codable, CaseIterable {
     case second
 }
 
+enum ActiveDataSource: String, Codable {
+    case ownPrivate
+    case sharedInvite
+}
+
+enum SpaceMembership: String, Codable {
+    case ownLocal
+    case ownSharedPendingPartner
+    case owner
+    case participant
+}
+
 enum MessageMood: String, CaseIterable, Codable, Identifiable {
     case sweet = "Ngọt ngào"
     case angry = "Giận dữ"

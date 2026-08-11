@@ -17,7 +17,11 @@ struct HomeView: View {
     let upcomingDay: SpecialDay?
     let upcomingDays: [SpecialDay]
     let hasUserContent: Bool
+    let showInvitePartnerBanner: Bool
+    let showSyncingBanner: Bool
     let onAddMemory: () -> Void
+    let onInvitePartner: () -> Void
+    let onDismissInvitePartnerBanner: () -> Void
     let onOpenSettings: () -> Void
     let onEditProfile: (ProfilePerson) -> Void
     let onSetRelationshipStart: (Date) -> Void
@@ -36,6 +40,14 @@ struct HomeView: View {
 
                 ScrollView {
                     VStack(alignment: .center, spacing: 26) {
+                        if showInvitePartnerBanner {
+                            InvitePartnerBanner(onInvite: onInvitePartner, onDismiss: onDismissInvitePartnerBanner)
+                        }
+
+                        if showSyncingBanner {
+                            CloudSyncingBanner()
+                        }
+
                         CoupleProfileCard(profile: profile, onEdit: onEditProfile)
                         heroSection
                         DailyLoveNoteCard(
@@ -266,5 +278,87 @@ struct HomeView: View {
             }
             .padding(.vertical, 2)
         }
+    }
+}
+
+struct InvitePartnerBanner: View {
+    let onInvite: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "heart.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.pink)
+                .frame(width: 40, height: 40)
+                .background(Color.pink.opacity(0.1), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Mời người ấy đồng bộ kỷ niệm")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+
+                Text("Gửi link để cùng dùng một MemoryBox.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("Mời ngay", action: onInvite)
+                .font(.caption.weight(.bold))
+                .buttonStyle(.borderedProminent)
+                .tint(.pink)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Ẩn lời nhắc")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.52), lineWidth: 1)
+        )
+    }
+}
+
+struct CloudSyncingBanner: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                .tint(.pink)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Đang đồng bộ dữ liệu từ iCloud")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+
+                Text("Kỷ niệm của hai bạn sẽ hiện sau khi import hoàn tất.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.52), lineWidth: 1)
+        )
     }
 }

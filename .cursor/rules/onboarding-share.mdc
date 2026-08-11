@@ -1,29 +1,36 @@
 ---
 description: Implement couple onboarding and share only per the flow spec
-globs: MemoryBox/**/Onboarding/**/*.swift,MemoryBox/**/Settings/**/*.swift,MemoryBox/Services/*Share*.swift,MemoryBox/Services/Onboarding*.swift
+globs: MemoryBox/**/Onboarding/**/*.swift,MemoryBox/**/Settings/**/*.swift,MemoryBox/Services/*Share*.swift,MemoryBox/Services/Onboarding*.swift,MemoryBox/Services/*Routing*.swift,MemoryBox/Services/*Restore*.swift
 alwaysApply: false
 ---
 
-# Onboarding & Couple Share
+# Onboarding & Couple Share (v2)
 
 Source of truth: **`docs/onboarding-couple-share-flow.md`**.
 
+## Product (3 choices)
+
+1. **Tự thiết lập dữ liệu** — private space (empty OK); share later in Settings.
+2. **Tải dữ liệu cũ** — must load existing private data; fail → error + retry / Quay Welcome.
+3. **Nhập từ link được mời** — shared space only; fail → error + retry / Quay Welcome.
+
+## Data rules (mandatory)
+
+- Restore session: success criteria in doc §2B.0. Fail → `RestoreDataErrorView`. **Never** MainTab on fail.
+- Import session: shared store only. Fail → `SharedImportErrorView`. **Never** private fallback.
+- Quay Welcome from either error → user picks another option.
+
 ## Must
 
-- Gate app with `onboardingCompleted` before `MainTabView`.
-- Paths: Create / Join / Solo — exactly as spec.
-- Accept share → always show success/fail UI (`JoinResultView`). Never silent.
-- Owner invite UI in onboarding + Settings; not Settings-only.
-- Persist `myRole` explicitly; do not infer role only from shared-store presence for new users.
-- UI tokens: padding 24, primary CTA height 52, progress bar height 4.
+- Welcome = exactly **3** buttons.
+- `RestoreDataLoadingView` + `RestoreDataErrorView`.
+- `SharedImportLoadingView` + `SharedImportErrorView`.
+- `CoupleDataRoutingService` enforces store by `activeDataSource`.
 
 ## Must not
 
-- Don't reintroduce `UICloudSharingController` as primary invite UI.
-- Don't auto-merge private + shared data without `ShareConflictView`.
-- Don't mark onboarding complete before role is chosen on Join success path.
-- Don't put onboarding state machine inside `ContentView`.
+- Don't open empty MainTab when restore fails.
+- Don't fallback private when import fails.
+- Don't auto-switch path on failure (user must Quay Welcome).
 
-## Implement order
-
-Use section 13 of the spec. Small PRs. Verify acceptance criteria in section 12.
+Implement order: doc **§9**.

@@ -17,6 +17,7 @@ enum MemoryLog {
 
 extension Notification.Name {
     static let memoryStoreDidChange = Notification.Name("memoryStoreDidChange")
+    static let coupleShareDidAccept = Notification.Name("coupleShareDidAccept")
 }
 
 extension Date {

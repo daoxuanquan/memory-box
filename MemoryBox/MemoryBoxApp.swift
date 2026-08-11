@@ -15,7 +15,7 @@ struct MemoryBoxApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootCoordinatorView()
                 .environment(\.managedObjectContext, persistence.container.viewContext)
         }
     }

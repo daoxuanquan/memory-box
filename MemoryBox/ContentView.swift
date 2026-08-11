@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var messages: [LoveMessage] = []
     @State private var specialDays: [SpecialDay] = []
     @State private var profile: CoupleProfile = .empty
+    @State private var spaceMembership = MemoryStore.loadSpaceMembership()
+    @State private var showInvitePartnerBanner = OnboardingStore.shouldShowInviteBanner(membership: MemoryStore.loadSpaceMembership())
     @State private var relationshipStart = MemoryStore.loadStartDate()
     @State private var hasRelationshipStart = MemoryStore.loadHasStartDate()
     @State private var activeSheet: ActiveSheet?
@@ -31,6 +33,10 @@ struct ContentView: View {
 
     private var hasUserContent: Bool {
         !memories.isEmpty || !messages.isEmpty || !specialDays.isEmpty
+    }
+
+    private var showSyncingBanner: Bool {
+        spaceMembership == .participant && OnboardingStore.activeDataSource == .sharedInvite && !hasUserContent
     }
 
     private var recentMemories: [LoveMemory] {
@@ -103,7 +109,11 @@ struct ContentView: View {
             upcomingDay: nextSpecialDay,
             upcomingDays: upcomingSpecialDays,
             hasUserContent: hasUserContent,
+            showInvitePartnerBanner: showInvitePartnerBanner,
+            showSyncingBanner: showSyncingBanner,
             onAddMemory: showAddMemory,
+            onInvitePartner: showSettings,
+            onDismissInvitePartnerBanner: dismissInvitePartnerBanner,
             onOpenSettings: showSettings,
             onEditProfile: showEditProfile,
             onSetRelationshipStart: saveRelationshipStart,
@@ -268,6 +278,8 @@ struct ContentView: View {
         messages = await loadedMessages
         specialDays = await loadedSpecialDays
         profile = await loadedProfile
+        spaceMembership = MemoryStore.loadSpaceMembership()
+        showInvitePartnerBanner = OnboardingStore.shouldShowInviteBanner(membership: spaceMembership)
         relationshipStart = MemoryStore.loadStartDate()
         hasRelationshipStart = MemoryStore.loadHasStartDate()
         _ = await AppIconManager.setIcon(MemoryStore.loadAppIconChoice())
@@ -322,6 +334,13 @@ struct ContentView: View {
                     presentedArrivalMessage = next
                 }
             }
+        }
+    }
+
+    private func dismissInvitePartnerBanner() {
+        OnboardingStore.dismissInviteBanner()
+        withAnimation(.easeOut(duration: 0.18)) {
+            showInvitePartnerBanner = false
         }
     }
 

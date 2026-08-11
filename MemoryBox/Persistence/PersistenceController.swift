@@ -266,7 +266,11 @@ final class PersistenceController {
                 attribute("secondAvatarSize", type: .doubleAttributeType, defaultValue: CoupleProfile.defaultAvatarSize),
                 attribute("secondImageData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
                 attribute("appIconRawValue", type: .stringAttributeType, isOptional: true),
-                attribute("customAppIconData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true)
+                attribute("customAppIconData", type: .binaryDataAttributeType, isOptional: true, allowsExternalBinaryDataStorage: true),
+                attribute("myRoleRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("activeDataSourceRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("spaceMembershipRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("onboardingCompleted", type: .booleanAttributeType, defaultValue: false)
             ]
         )
     }
@@ -399,7 +403,97 @@ enum MemoryStore {
     }
 
     static func currentSenderRole() -> MessageSenderRole {
-        isUsingSharedCoupleSpace() ? .second : .first
+        loadMyRole() ?? (isUsingSharedCoupleSpace() ? .second : .first)
+    }
+
+    static func loadMyRole() -> MessageSenderRole? {
+        migrateUserDefaultsIfNeeded()
+        return (activeSettingsObject()?.value(forKey: "myRoleRawValue") as? String)
+            .flatMap(MessageSenderRole.init(rawValue:))
+    }
+
+    static func save(myRole: MessageSenderRole) {
+        migrateUserDefaultsIfNeeded()
+        let settings = existingOrNewSettings()
+        settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
+        settings.setValue(myRole.rawValue, forKey: "myRoleRawValue")
+        saveContext()
+    }
+
+    static func loadSpaceMembership() -> SpaceMembership {
+        migrateUserDefaultsIfNeeded()
+        let rawValue = activeSettingsObject()?.value(forKey: "spaceMembershipRawValue") as? String
+        if let membership = rawValue.flatMap(SpaceMembership.init(rawValue:)) {
+            return membership
+        }
+
+        return isUsingSharedCoupleSpace() ? .participant : .ownLocal
+    }
+
+    static func save(spaceMembership: SpaceMembership) {
+        migrateUserDefaultsIfNeeded()
+        let settings = existingOrNewSettings()
+        settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
+        settings.setValue(spaceMembership.rawValue, forKey: "spaceMembershipRawValue")
+        saveContext()
+    }
+
+    static func save(activeDataSource: ActiveDataSource) {
+        migrateUserDefaultsIfNeeded()
+        let settings = existingOrNewSettings()
+        settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
+        settings.setValue(activeDataSource.rawValue, forKey: "activeDataSourceRawValue")
+        saveContext()
+    }
+
+    static func hasLocalCoupleData() -> Bool {
+        migrateUserDefaultsIfNeeded()
+        let privateStore = PersistenceController.shared.privatePersistentStore
+        guard privateStore != nil else { return false }
+
+        if !fetchObjects(entityName: "StoredMemory", in: privateStore).isEmpty { return true }
+        if !fetchObjects(entityName: "StoredLetter", in: privateStore).isEmpty { return true }
+        if !fetchObjects(entityName: "StoredSpecialDay", in: privateStore).isEmpty { return true }
+        let settings = fetchFirstObject(
+            entityName: "AppSettings",
+            predicate: NSPredicate(format: "id == %@", settingsID),
+            in: privateStore
+        )
+        if settings?.value(forKey: "startDateIsSet") as? Bool == true { return true }
+        let profile = settings.flatMap(makeProfile) ?? .empty
+        return !profile.firstName.trimmed.isEmpty || !profile.secondName.trimmed.isEmpty
+    }
+
+    static func hasPrivateCoupleDataOnly() -> Bool {
+        hasLocalCoupleData()
+    }
+
+    static func hasPrivateCoupleSpaceOnly() -> Bool {
+        guard let privateStore = PersistenceController.shared.privatePersistentStore else { return false }
+        return coupleSpaceObject(in: privateStore) != nil
+    }
+
+    static func ensurePrivateCoupleSpace() {
+        migrateUserDefaultsIfNeeded()
+        let space = existingOrNewCoupleSpace()
+        backfillSpaceRelationships(space, in: PersistenceController.shared.privatePersistentStore)
+        saveContext()
+    }
+
+    static func loadOnboardingCompleted() -> Bool {
+        migrateUserDefaultsIfNeeded()
+        let local = UserDefaults.standard.bool(forKey: OnboardingStore.completedKey)
+        let synced = activeSettingsObject()?.value(forKey: "onboardingCompleted") as? Bool ?? false
+        return local || synced
+    }
+
+    static func save(onboardingCompleted: Bool) {
+        migrateUserDefaultsIfNeeded()
+        UserDefaults.standard.set(onboardingCompleted, forKey: OnboardingStore.completedKey)
+        let settings = existingOrNewSettings()
+        settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
+        settings.setValue(onboardingCompleted, forKey: "onboardingCompleted")
+        saveContext()
     }
 
     static func unreadIncomingMessages(from messages: [LoveMessage]) -> [LoveMessage] {
@@ -720,15 +814,30 @@ enum MemoryStore {
         MemoryLog.share("acceptShareInvitation: nhận metadata (owner=\(metadata.ownerIdentity.userRecordID?.recordName ?? "nil"))")
         guard let sharedStore = PersistenceController.shared.sharedPersistentStore else {
             MemoryLog.share("acceptShareInvitation: thiếu sharedPersistentStore -> bỏ qua")
+            NotificationCenter.default.post(
+                name: .coupleShareDidAccept,
+                object: nil,
+                userInfo: ["success": false, "error": "Không tìm thấy shared store trên thiết bị này."]
+            )
             return
         }
         cloudKitContainer.acceptShareInvitations(from: [metadata], into: sharedStore) { _, error in
             DispatchQueue.main.async {
                 if let error {
                     MemoryLog.share("acceptShareInvitation: THẤT BẠI: \(error.localizedDescription)")
+                    NotificationCenter.default.post(
+                        name: .coupleShareDidAccept,
+                        object: nil,
+                        userInfo: ["success": false, "error": error.localizedDescription]
+                    )
                 } else {
                     MemoryLog.share("acceptShareInvitation: THÀNH CÔNG")
                     MemoryStore.reconcileAfterCloudSync()
+                    NotificationCenter.default.post(
+                        name: .coupleShareDidAccept,
+                        object: nil,
+                        userInfo: ["success": true]
+                    )
                     NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
                 }
             }
@@ -738,6 +847,20 @@ enum MemoryStore {
     static func isUsingSharedCoupleSpace() -> Bool {
         guard let sharedStore = PersistenceController.shared.sharedPersistentStore else { return false }
         return activeCoupleStore() == sharedStore
+    }
+
+    static func isUsingSharedCoupleSpaceHeuristic() -> Bool {
+        guard let sharedStore = PersistenceController.shared.sharedPersistentStore else { return false }
+        return coupleSpaceObject(in: sharedStore) != nil
+    }
+
+    static func hasSharedCoupleSpace() -> Bool {
+        guard let sharedStore = PersistenceController.shared.sharedPersistentStore else { return false }
+        return coupleSpaceObject(in: sharedStore) != nil
+    }
+
+    static func hasSharedCoupleSpaceOnly() -> Bool {
+        hasSharedCoupleSpace()
     }
 
     /// Call after CloudKit setup/import so reinstall restores names, start date, and content
@@ -1393,12 +1516,7 @@ enum MemoryStore {
     }
 
     private static func existingOrNewSettings() -> NSManagedObject {
-        if let settings = activeSettingsObject() {
-            return settings
-        }
-
-        let space = existingOrNewCoupleSpace()
-        let targetStore = persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
+        let targetStore = activeCoupleStore() ?? PersistenceController.shared.privatePersistentStore
         if let settings = fetchFirstObject(
             entityName: "AppSettings",
             predicate: NSPredicate(format: "id == %@", settingsID),
@@ -1407,8 +1525,10 @@ enum MemoryStore {
             return settings
         }
 
+        let space = existingOrNewCoupleSpace()
         let settings = NSManagedObject(entity: entityDescription(named: "AppSettings"), insertInto: context)
         assign(settings, to: targetStore)
+        settings.setValue(settingsID, forKey: "id")
         settings.setValue(space, forKey: "space")
         return settings
     }
@@ -1422,6 +1542,10 @@ enum MemoryStore {
         )
         if let best = inActiveStore.max(by: { settingsContentScore($0) < settingsContentScore($1) }) {
             return best
+        }
+
+        if OnboardingStore.importSessionActive || OnboardingStore.activeDataSource == .sharedInvite {
+            return nil
         }
 
         let all = fetchObjects(
@@ -1456,6 +1580,14 @@ enum MemoryStore {
     }
 
     private static func activeCoupleStore(_ ctx: NSManagedObjectContext = context) -> NSPersistentStore? {
+        let routedStore = CoupleDataRoutingService.activeStore()
+        if OnboardingStore.importSessionActive || OnboardingStore.activeDataSource == .sharedInvite {
+            return routedStore
+        }
+        if OnboardingStore.activeDataSource == .ownPrivate {
+            return routedStore
+        }
+
         if let sharedStore = PersistenceController.shared.sharedPersistentStore,
            fetchFirstObject(
                 entityName: "CoupleSpace",
@@ -1501,6 +1633,8 @@ enum MemoryStore {
         do {
             try context.save()
         } catch {
+            let nsError = error as NSError
+            print("Unable to save Core Data changes: \(nsError), userInfo: \(nsError.userInfo)")
             assertionFailure("Unable to save Core Data changes: \(error.localizedDescription)")
         }
     }

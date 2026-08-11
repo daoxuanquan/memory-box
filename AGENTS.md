@@ -40,14 +40,13 @@ MemoryBox/
 
 ## Onboarding & share — non-negotiables
 
-1. First launch is gated by onboarding (Create / Join / Solo), not raw Home.
-2. Share accept always shows success or failure UI.
-3. User picks `myRole` explicitly (first/second).
-4. Invite partner is part of Create onboarding + Settings, not Settings-only.
-5. No silent accept. No `UICloudSharingController` as primary invite UI.
-6. Private vs shared conflict → `ShareConflictView` (no auto-merge in MVP).
+1. First launch: **3 choices** — **Tự thiết lập dữ liệu** | **Tải dữ liệu cũ** | **Nhập từ link được mời**.
+2. **Tự thiết lập** → private (empty OK). Share later in Settings.
+3. **Tải dữ liệu cũ** → must successfully load private data; fail → `RestoreDataErrorView` + retry / Quay Welcome. **Never** open MainTab as success when restore fails.
+4. **Import link** → shared only; fail → `SharedImportErrorView` + retry / Quay Welcome. **Never fallback to private.**
+5. Import + existing private data → confirm abandon → shared only. No merge in MVP.
 
-Implement in the order listed in the onboarding doc §13.
+Implement in the order listed in the onboarding doc §9.
 
 ## UI conventions
 

@@ -2,7 +2,7 @@
 
 | Document | Purpose |
 |----------|---------|
-| [onboarding-couple-share-flow.md](./onboarding-couple-share-flow.md) | Full UX/UI spec for first-launch onboarding, Create / Join / Solo paths, invite link, post-onboarding Settings & banners — **source of truth for AI implementation** |
+| [onboarding-couple-share-flow.md](./onboarding-couple-share-flow.md) | Full UX/UI spec: Welcome **3 choices** (setup / restore old / import link), shared-only import, restore-must-succeed, unhappy cases — **source of truth for AI** |
 
 Agent instructions also live in:
 

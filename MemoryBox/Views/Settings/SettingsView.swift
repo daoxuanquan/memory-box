@@ -15,29 +15,39 @@ struct SettingsView: View {
     @State private var shareErrorText: String?
     @State private var iCloudStatusText = "Đang kiểm tra..."
     @State private var notificationStatusText = "Đang kiểm tra..."
-    @State private var isUsingSharedSpace = false
+    @State private var spaceMembership = MemoryStore.loadSpaceMembership()
     @State private var selectedAppIcon: AppIconChoice = .dragonBulliesPig
     @State private var iconErrorText: String?
+    @State private var showingLeaveConfirmation = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Đồng bộ cặp đôi") {
+                    LabeledContent("Trạng thái", value: shareStatusText)
                     LabeledContent("iCloud", value: iCloudStatusText)
                     LabeledContent("Thông báo", value: notificationStatusText)
 
-                    Button {
-                        prepareInviteLink()
-                    } label: {
-                        HStack {
-                            Label("Mời ai đó chia sẻ dữ liệu", systemImage: "person.badge.plus")
-                            if isPreparingShare {
-                                Spacer()
-                                ProgressView()
+                    if spaceMembership != .participant {
+                        Button {
+                            prepareInviteLink()
+                        } label: {
+                            HStack {
+                                Label("Mời người ấy", systemImage: "person.badge.plus")
+                                if isPreparingShare {
+                                    Spacer()
+                                    ProgressView()
+                                }
                             }
                         }
+                        .disabled(isPreparingShare)
+                    } else {
+                        Button(role: .destructive) {
+                            showingLeaveConfirmation = true
+                        } label: {
+                            Label("Rời không gian chia sẻ", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
                     }
-                    .disabled(isUsingSharedSpace || isPreparingShare)
 
                     Text(shareHelpText)
                         .font(.footnote)
@@ -117,6 +127,17 @@ struct SettingsView: View {
             } message: {
                 Text(iconErrorText ?? "")
             }
+            .alert("Rời không gian chia sẻ?", isPresented: $showingLeaveConfirmation) {
+                Button("Hủy", role: .cancel) { }
+                Button("Rời", role: .destructive) {
+                    OnboardingStore.save(activeDataSource: .ownPrivate)
+                    MemoryStore.save(spaceMembership: .ownLocal)
+                    spaceMembership = .ownLocal
+                    NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
+                }
+            } message: {
+                Text("MemoryBox sẽ quay về dữ liệu riêng trên máy này. Dữ liệu shared không bị gộp trong bản MVP.")
+            }
             .task {
                 let syncedChoice = MemoryStore.loadAppIconChoice()
                 selectedAppIcon = syncedChoice
@@ -150,22 +171,54 @@ struct SettingsView: View {
     }
 
     private var shareHelpText: String {
-        if isUsingSharedSpace {
+        if spaceMembership == .participant {
             return "Thiết bị này đã tham gia không gian MemoryBox được chia sẻ. Dữ liệu sẽ đồng bộ qua iCloud."
         }
 
         return "Tạo link mời để gửi cho người ấy. Khi họ mở link và chấp nhận, hai máy sẽ đồng bộ dữ liệu qua iCloud."
     }
 
+    private var shareStatusText: String {
+        switch spaceMembership {
+        case .ownLocal:
+            return "Dữ liệu trên máy này"
+        case .ownSharedPendingPartner, .owner:
+            return "Đang chờ người ấy tham gia"
+        case .participant:
+            return "Đã tham gia không gian chia sẻ"
+        }
+    }
+
     private func prepareInviteLink() {
         guard !isPreparingShare else { return }
         isPreparingShare = true
-        MemoryStore.prepareCoupleShare { share, container, error in
-            isPreparingShare = false
-            if let share, let container {
-                inviteSheet = ShareInvitePayload(share: share, container: container)
-            } else {
-                shareErrorText = error?.localizedDescription ?? "Không tạo được link mời."
+
+        Task {
+            let container = CKContainer(identifier: PersistenceController.cloudKitContainerIdentifier)
+            do {
+                let status = try await container.accountStatus()
+                guard status == .available else {
+                    isPreparingShare = false
+                    shareErrorText = "MemoryBox cần iCloud đã đăng nhập để tạo link mời."
+                    return
+                }
+            } catch {
+                isPreparingShare = false
+                shareErrorText = "Không kiểm tra được iCloud: \(error.localizedDescription)"
+                return
+            }
+
+            MemoryStore.prepareCoupleShare { share, container, error in
+                Task { @MainActor in
+                    isPreparingShare = false
+                    if let share, let container {
+                        MemoryStore.save(spaceMembership: .ownSharedPendingPartner)
+                        spaceMembership = .ownSharedPendingPartner
+                        inviteSheet = ShareInvitePayload(share: share, container: container)
+                    } else {
+                        shareErrorText = error?.localizedDescription ?? "Không tạo được link mời."
+                    }
+                }
             }
         }
     }
@@ -178,7 +231,7 @@ struct SettingsView: View {
     }
 
     private func refreshShareState() {
-        isUsingSharedSpace = MemoryStore.isUsingSharedCoupleSpace()
+        spaceMembership = MemoryStore.loadSpaceMembership()
     }
 
     private func refreshCloudStatus() async {
