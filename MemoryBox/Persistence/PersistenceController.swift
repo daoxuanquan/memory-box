@@ -239,7 +239,9 @@ final class PersistenceController {
                 attribute("id", type: .UUIDAttributeType, isOptional: true),
                 attribute("title", type: .stringAttributeType, isOptional: true),
                 attribute("date", type: .dateAttributeType, isOptional: true),
-                attribute("symbolName", type: .stringAttributeType, isOptional: true)
+                attribute("symbolName", type: .stringAttributeType, isOptional: true),
+                attribute("recurrenceRawValue", type: .stringAttributeType, isOptional: true),
+                attribute("reminderOffsetsRaw", type: .stringAttributeType, isOptional: true)
             ]
         )
     }
@@ -1114,6 +1116,8 @@ enum MemoryStore {
         object.setValue(day.title, forKey: "title")
         object.setValue(day.date, forKey: "date")
         object.setValue(day.symbolName, forKey: "symbolName")
+        object.setValue(day.recurrence.rawValue, forKey: "recurrenceRawValue")
+        object.setValue(encodedReminderOffsets(day.reminderOffsets), forKey: "reminderOffsetsRaw")
         object.setValue(space, forKey: "space")
     }
 
@@ -1228,7 +1232,18 @@ enum MemoryStore {
             let symbolName = object.value(forKey: "symbolName") as? String
         else { return nil }
 
-        return SpecialDay(id: id, title: title, date: date, symbolName: symbolName)
+        let recurrence = (object.value(forKey: "recurrenceRawValue") as? String)
+            .flatMap(SpecialDayRecurrence.init(rawValue:)) ?? .yearly
+        let reminderOffsets = decodedReminderOffsets(from: object.value(forKey: "reminderOffsetsRaw") as? String)
+
+        return SpecialDay(
+            id: id,
+            title: title,
+            date: date,
+            symbolName: symbolName,
+            recurrence: recurrence,
+            reminderOffsets: reminderOffsets
+        )
     }
 
     private static func makeProfile(from object: NSManagedObject) -> CoupleProfile? {
@@ -1505,6 +1520,20 @@ enum MemoryStore {
         else { return [] }
 
         return paths
+    }
+
+    private static func encodedReminderOffsets(_ offsets: [Int]) -> String? {
+        guard let data = try? JSONEncoder().encode(offsets) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func decodedReminderOffsets(from rawValue: String?) -> [Int] {
+        guard let rawValue,
+              let data = rawValue.data(using: .utf8),
+              let offsets = try? JSONDecoder().decode([Int].self, from: data)
+        else { return SpecialDay.defaultReminderOffsets }
+
+        return offsets
     }
 
     private static func loadFromUserDefaults<T: Decodable>(_ type: T.Type, key: String) -> T? {

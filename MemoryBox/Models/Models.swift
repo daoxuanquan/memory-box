@@ -292,17 +292,161 @@ struct LoveMessageDraft {
     var replyToID: UUID?
 }
 
+enum SpecialDayRecurrence: String, CaseIterable, Codable, Identifiable {
+    case weekly = "Hàng tuần"
+    case monthly = "Hàng tháng"
+    case yearly = "Hằng năm"
+    case once = "Một lần"
+
+    var id: String { rawValue }
+}
+
+enum SpecialDayReminderOption: Int, CaseIterable, Codable, Identifiable {
+    case oneMonth = 30
+    case oneWeek = 7
+    case threeDays = 3
+    case oneDay = 1
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .oneMonth:
+            return "Trước 1 tháng"
+        case .oneWeek:
+            return "Trước 7 ngày"
+        case .threeDays:
+            return "Trước 3 ngày"
+        case .oneDay:
+            return "Trước 1 ngày"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .oneMonth:
+            return "1 tháng"
+        case .oneWeek:
+            return "7 ngày"
+        case .threeDays:
+            return "3 ngày"
+        case .oneDay:
+            return "1 ngày"
+        }
+    }
+}
+
 struct SpecialDay: Identifiable, Codable {
+    static let defaultReminderOffsets = SpecialDayReminderOption.allCases.map(\.rawValue)
+
     let id: UUID
     var title: String
     var date: Date
     var symbolName: String
+    var recurrence: SpecialDayRecurrence
+    var reminderOffsets: [Int]
 
-    init(id: UUID = UUID(), title: String, date: Date, symbolName: String) {
+    init(
+        id: UUID = UUID(),
+        title: String,
+        date: Date,
+        symbolName: String,
+        recurrence: SpecialDayRecurrence = .yearly,
+        reminderOffsets: [Int] = SpecialDay.defaultReminderOffsets
+    ) {
         self.id = id
         self.title = title
         self.date = date
         self.symbolName = symbolName
+        self.recurrence = recurrence
+        self.reminderOffsets = Self.normalizedReminderOffsets(reminderOffsets)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case date
+        case symbolName
+        case recurrence
+        case reminderOffsets
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        date = try container.decode(Date.self, forKey: .date)
+        symbolName = try container.decode(String.self, forKey: .symbolName)
+        recurrence = try container.decodeIfPresent(SpecialDayRecurrence.self, forKey: .recurrence) ?? .yearly
+        reminderOffsets = Self.normalizedReminderOffsets(
+            try container.decodeIfPresent([Int].self, forKey: .reminderOffsets) ?? Self.defaultReminderOffsets
+        )
+    }
+
+    var nextOccurrence: Date {
+        let calendar = Calendar.current
+        let today = Date().startOfDay
+        let originalDate = date.startOfDay
+
+        switch recurrence {
+        case .once:
+            return originalDate
+        case .weekly:
+            if originalDate >= today {
+                return originalDate
+            }
+
+            let weekday = calendar.component(.weekday, from: originalDate)
+            let matchingPolicy: Calendar.MatchingPolicy = .nextTimePreservingSmallerComponents
+            return calendar.nextDate(
+                after: today.addingTimeInterval(-1),
+                matching: DateComponents(weekday: weekday),
+                matchingPolicy: matchingPolicy
+            ) ?? originalDate
+        case .monthly:
+            return nextMonthlyOccurrence(calendar: calendar, today: today, originalDate: originalDate)
+        case .yearly:
+            return date.nextAnnualOccurrence()
+        }
+    }
+
+    var isPastSingleEvent: Bool {
+        recurrence == .once && date.startOfDay < Date().startOfDay
+    }
+
+    var reminderOptions: [SpecialDayReminderOption] {
+        reminderOffsets.compactMap(SpecialDayReminderOption.init(rawValue:))
+    }
+
+    private static func normalizedReminderOffsets(_ offsets: [Int]) -> [Int] {
+        SpecialDayReminderOption.allCases
+            .map(\.rawValue)
+            .filter { offsets.contains($0) }
+    }
+
+    private func nextMonthlyOccurrence(calendar: Calendar, today: Date, originalDate: Date) -> Date {
+        if originalDate >= today {
+            return originalDate
+        }
+
+        let originalDay = calendar.component(.day, from: originalDate)
+        var components = calendar.dateComponents([.year, .month], from: today)
+
+        for monthOffset in 0...1 {
+            guard let monthDate = calendar.date(byAdding: .month, value: monthOffset, to: calendar.date(from: components) ?? today) else {
+                continue
+            }
+
+            components = calendar.dateComponents([.year, .month], from: monthDate)
+            let daysInMonth = calendar.range(of: .day, in: .month, for: monthDate)?.count ?? originalDay
+            components.day = min(originalDay, daysInMonth)
+
+            if let candidate = calendar.date(from: components), candidate.startOfDay >= today {
+                return candidate
+            }
+        }
+
+        return originalDate
     }
 }
 

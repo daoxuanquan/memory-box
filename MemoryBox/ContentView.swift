@@ -146,8 +146,9 @@ struct ContentView: View {
 
     private var upcomingSpecialDays: [SpecialDay] {
         specialDays
+            .filter { !$0.isPastSingleEvent }
             .map { day -> (SpecialDay, Date) in
-                let nextDate = day.date.nextAnnualOccurrence()
+                let nextDate = day.nextOccurrence
                 return (day, nextDate)
             }
             .sorted { $0.1 < $1.1 }

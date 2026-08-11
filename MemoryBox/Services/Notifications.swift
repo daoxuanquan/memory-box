@@ -24,7 +24,6 @@ enum LoveNotificationScheduler {
     private static let previewHour = 20
     private static let milestoneHour = 9
     private static let maxScheduledSpecialDays = 24
-    private static let specialDayReminderOffsets = [30, 7, 3, 1]
     private static let milestoneDays = [100, 365, 500, 1000, 1500, 2000, 3000, 3650]
     private static let todayReminderDefaultsPrefix = "memorybox.todayReminder."
 
@@ -117,21 +116,22 @@ enum LoveNotificationScheduler {
 
     private static func scheduleSpecialDays(_ specialDays: [SpecialDay]) async {
         let upcomingDays = specialDays
-            .sorted { $0.date.nextAnnualOccurrence() < $1.date.nextAnnualOccurrence() }
+            .filter { !$0.isPastSingleEvent }
+            .sorted { $0.nextOccurrence < $1.nextOccurrence }
             .prefix(maxScheduledSpecialDays)
 
         for day in upcomingDays {
-            await scheduleAnnualSpecialDay(day)
+            await scheduleSpecialDay(day)
             await scheduleSpecialDayReminders(day)
-            if day.date.nextAnnualOccurrence().startOfDay == Date().startOfDay && shouldScheduleTodayReminder(for: day) {
+            if day.nextOccurrence.startOfDay == Date().startOfDay && shouldScheduleTodayReminder(for: day) {
                 await scheduleImmediateSpecialDayReminder(day)
                 markTodayReminderScheduled(for: day)
             }
         }
     }
 
-    private static func scheduleAnnualSpecialDay(_ day: SpecialDay) async {
-        var components = annualComponents(from: day.date)
+    private static func scheduleSpecialDay(_ day: SpecialDay) async {
+        guard var components = notificationComponents(for: day) else { return }
         components.hour = specialDayHour
         components.minute = 0
 
@@ -141,7 +141,7 @@ enum LoveNotificationScheduler {
         content.sound = .default
         content.categoryIdentifier = "MEMORYBOX_SPECIAL_DAY"
 
-        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: day.recurrence != .once)
         let request = UNNotificationRequest(
             identifier: "\(identifierPrefix)special.\(day.id.uuidString).day",
             content: content,
@@ -184,15 +184,21 @@ enum LoveNotificationScheduler {
     }
 
     private static func scheduleSpecialDayReminders(_ day: SpecialDay) async {
-        for offset in specialDayReminderOffsets {
+        for offset in day.reminderOffsets {
             await scheduleSpecialDayReminder(day, daysBefore: offset)
         }
     }
 
     private static func scheduleSpecialDayReminder(_ day: SpecialDay, daysBefore: Int) async {
-        guard let reminderDate = Calendar.current.date(byAdding: .day, value: -daysBefore, to: day.date) else { return }
+        guard let reminderDate = Calendar.current.date(byAdding: .day, value: -daysBefore, to: day.nextOccurrence) else {
+            return
+        }
 
-        var components = annualComponents(from: reminderDate)
+        if day.recurrence == .once, reminderDate.startOfDay < Date().startOfDay {
+            return
+        }
+
+        var components = notificationComponents(for: day.recurrence, date: reminderDate)
         components.hour = previewHour
         components.minute = 0
 
@@ -202,7 +208,7 @@ enum LoveNotificationScheduler {
         content.sound = .default
         content.categoryIdentifier = "MEMORYBOX_SPECIAL_DAY"
 
-        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: day.recurrence != .once)
         let request = UNNotificationRequest(
             identifier: "\(identifierPrefix)special.\(day.id.uuidString).before.\(daysBefore)",
             content: content,
@@ -329,6 +335,35 @@ enum LoveNotificationScheduler {
 
     private static func annualComponents(from date: Date) -> DateComponents {
         Calendar.current.dateComponents([.month, .day], from: date)
+    }
+
+    private static func notificationComponents(for day: SpecialDay) -> DateComponents? {
+        switch day.recurrence {
+        case .weekly:
+            return notificationComponents(for: day.recurrence, date: day.date)
+        case .monthly:
+            return notificationComponents(for: day.recurrence, date: day.date)
+        case .yearly:
+            return notificationComponents(for: day.recurrence, date: day.date)
+        case .once:
+            guard day.date.startOfDay >= Date().startOfDay else { return nil }
+            return notificationComponents(for: day.recurrence, date: day.date)
+        }
+    }
+
+    private static func notificationComponents(for recurrence: SpecialDayRecurrence, date: Date) -> DateComponents {
+        let calendar = Calendar.current
+
+        switch recurrence {
+        case .weekly:
+            return calendar.dateComponents([.weekday], from: date)
+        case .monthly:
+            return calendar.dateComponents([.day], from: date)
+        case .yearly:
+            return annualComponents(from: date)
+        case .once:
+            return calendar.dateComponents([.year, .month, .day], from: date)
+        }
     }
 
     private static func currentSettings() async -> UNNotificationSettings {

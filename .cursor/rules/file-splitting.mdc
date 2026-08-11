@@ -1,0 +1,36 @@
+---
+description: File size and view splitting conventions
+globs: MemoryBox/**/*.swift
+alwaysApply: false
+---
+
+# MemoryBox — File & View splitting
+
+## Hard limits
+
+- Prefer files **under 250 lines**. Soft warn at 300. Split before 400.
+- `PersistenceController.swift` is legacy-fat — **do not add** new feature APIs there; put in `Services/*`.
+- Do not dump multiple unrelated screens into `Editors.swift` / `HomeComponents.swift` for new work.
+
+## Naming
+
+| Kind | Pattern |
+|------|---------|
+| Screen | `FooView.swift` |
+| Section/subview | `FooHeaderView.swift`, `FooEmptyView.swift` |
+| ViewModel | `FooViewModel.swift` |
+| Service | `FooService.swift` |
+| Coordinator | `FooCoordinatorView.swift` |
+
+## Onboarding / Share
+
+Follow `docs/onboarding-couple-share-flow.md`. New files go under:
+
+- `Views/Onboarding/`
+- `ViewModels/Onboarding/`
+
+## Don't
+
+- Don't create “Utils.swift” god files.
+- Don't put ViewModels inside View files.
+- Don't keep dead code “for later”.

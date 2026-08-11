@@ -67,7 +67,7 @@ struct LoveDashboardView: View {
         }
 
         if let upcomingDay {
-            return "\(upcomingDay.title) đang \(upcomingDay.date.nextAnnualOccurrence().relativeDayText.lowercased())."
+            return "\(upcomingDay.title) đang \(upcomingDay.nextOccurrence.relativeDayText.lowercased())."
         }
 
         return "Hôm nay thêm một khoảnh khắc nhỏ cũng đủ làm timeline sáng hơn."
@@ -524,4 +524,3 @@ struct AvatarView: View {
         .shadow(color: color.opacity(0.28), radius: 8, y: 4)
     }
 }
-

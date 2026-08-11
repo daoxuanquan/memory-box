@@ -1,0 +1,41 @@
+---
+description: SwiftUI MVVM clean architecture for MemoryBox
+globs: MemoryBox/**/*.swift
+alwaysApply: false
+---
+
+# MemoryBox — SwiftUI MVVM
+
+## Layers
+
+- **View**: layout + bind UI only. No CloudKit, no Core Data fetch, no `MemoryStore` save/load in View body actions beyond calling VM.
+- **ViewModel**: `@MainActor` + `@Observable` (or `ObservableObject`). Owns screen state, user intents, calls services.
+- **Service / Store**: `MemoryStore`, `CoupleShareService`, `OnboardingStore`. Persistence & CloudKit live here.
+- **Model**: pure `struct`/`enum` in `Models/`.
+
+## Rules
+
+- New feature → new ViewModel file. Do not grow `ContentView` with feature logic.
+- One screen ≈ one folder under `Views/<Feature>/` + matching `ViewModels/<Feature>/`.
+- Extract subviews to their own files when > ~80 lines or reused.
+- Prefer constructor injection of services into VMs for testability.
+- No `PersistenceController` calls from Views.
+
+## Example
+
+```swift
+// ✅ View
+struct WelcomeView: View {
+    @Bindable var viewModel: WelcomeViewModel
+    var body: some View {
+        Button("Tạo không gian") { viewModel.createCoupleTapped() }
+    }
+}
+
+// ❌ View calling store directly
+Button("Tạo") { MemoryStore.prepareCoupleShare { ... } }
+```
+
+## Migration
+
+When touching a legacy screen that calls `MemoryStore` directly, extract a ViewModel in the same PR if the change is non-trivial. Don't rewrite the whole app unprompted.

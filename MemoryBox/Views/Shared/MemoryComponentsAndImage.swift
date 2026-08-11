@@ -270,6 +270,10 @@ enum ImageFileStore {
         UIImage(contentsOfFile: fileURL(for: relativePath).path)
     }
 
+    static func shareURL(for relativePath: String) -> URL {
+        fileURL(for: relativePath)
+    }
+
     static func displayAspectRatio(for relativePath: String) -> CGFloat? {
         guard let image = uiImage(for: relativePath), image.size.height > 0 else { return nil }
         return image.size.width / image.size.height

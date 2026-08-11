@@ -312,6 +312,8 @@ struct SpecialDayEditorView: View {
     @State private var title: String
     @State private var date: Date
     @State private var symbolName: String
+    @State private var recurrence: SpecialDayRecurrence
+    @State private var selectedReminderOffsets: Set<Int>
 
     let mode: SpecialDayEditorMode
     let onSave: (SpecialDay) -> Void
@@ -324,6 +326,8 @@ struct SpecialDayEditorView: View {
         self._title = State(initialValue: day?.title ?? "")
         self._date = State(initialValue: day?.date ?? Date())
         self._symbolName = State(initialValue: day?.symbolName ?? "heart.circle.fill")
+        self._recurrence = State(initialValue: day?.recurrence ?? .yearly)
+        self._selectedReminderOffsets = State(initialValue: Set(day?.reminderOffsets ?? SpecialDay.defaultReminderOffsets))
     }
 
     var body: some View {
@@ -332,10 +336,33 @@ struct SpecialDayEditorView: View {
                 Section("Ngày đặc biệt") {
                     TextField("Tên ngày", text: $title)
                     DatePicker("Ngày", selection: $date, displayedComponents: .date)
+                    Picker("Lặp lại", selection: $recurrence) {
+                        ForEach(SpecialDayRecurrence.allCases) { recurrence in
+                            Text(recurrence.rawValue).tag(recurrence)
+                        }
+                    }
                     Picker("Biểu tượng", selection: $symbolName) {
                         ForEach(symbols, id: \.self) { symbol in
                             Label(symbol, systemImage: symbol).tag(symbol)
                         }
+                    }
+                }
+
+                Section("Nhắc trước") {
+                    ForEach(SpecialDayReminderOption.allCases) { option in
+                        Button {
+                            toggleReminder(option)
+                        } label: {
+                            HStack {
+                                Text(option.title)
+                                Spacer()
+                                if selectedReminderOffsets.contains(option.rawValue) {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.pink)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -353,7 +380,9 @@ struct SpecialDayEditorView: View {
                                 id: mode.existingDay?.id ?? UUID(),
                                 title: title.trimmed,
                                 date: date,
-                                symbolName: symbolName
+                                symbolName: symbolName,
+                                recurrence: recurrence,
+                                reminderOffsets: Array(selectedReminderOffsets)
                             )
                         )
                         dismiss()
@@ -361,6 +390,14 @@ struct SpecialDayEditorView: View {
                     .disabled(title.trimmed.isEmpty)
                 }
             }
+        }
+    }
+
+    private func toggleReminder(_ option: SpecialDayReminderOption) {
+        if selectedReminderOffsets.contains(option.rawValue) {
+            selectedReminderOffsets.remove(option.rawValue)
+        } else {
+            selectedReminderOffsets.insert(option.rawValue)
         }
     }
 }
@@ -604,4 +641,3 @@ struct ProfileEditorSection: View {
         .shadow(color: color.color.opacity(0.18), radius: 18, y: 10)
     }
 }
-

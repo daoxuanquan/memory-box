@@ -1,0 +1,25 @@
+---
+description: MemoryBox product and coding defaults for every chat
+alwaysApply: true
+---
+
+# MemoryBox product context
+
+Couple journal app (SwiftUI + Core Data + CloudKit). Tabs: Home, Kỷ niệm, Tin nhắn, Ngày đặc biệt.
+
+## Before coding share/onboarding
+
+Read `docs/onboarding-couple-share-flow.md` and follow it.
+
+## Architecture defaults
+
+- Target: **View + ViewModel + Service**, not fat Views.
+- Vietnamese UI copy. Keep existing romantic visual language (`AnimatedLoveBackdrop`, pink tint).
+- Appearance: app-controlled light/dark via `AppAppearance`, not system-only.
+- Karpathy guidelines still apply: small diffs, no speculative features.
+
+## Do not
+
+- Don't commit xcuserdata / `.DS_Store`.
+- Don't force-push unless the user explicitly asks.
+- Don't expand CloudKit schema casually; extend carefully and document.

@@ -6,15 +6,46 @@
 import SwiftUI
 
 struct SpecialDaysView: View {
+    enum DayScope: String, CaseIterable, Identifiable {
+        case current = "Hiện tại"
+        case past = "Quá khứ"
+
+        var id: String { rawValue }
+    }
+
     @Binding var specialDays: [SpecialDay]
     let onAddDay: () -> Void
     let onChange: () -> Void
     let onUpdate: (SpecialDay) -> Void
     @State private var editingDay: SpecialDay?
     @State private var isShowingLunarCalendar = false
+    @State private var selectedScope: DayScope = .current
 
     private var sortedDays: [SpecialDay] {
-        specialDays.sorted { $0.date.nextAnnualOccurrence() < $1.date.nextAnnualOccurrence() }
+        filteredDays.sorted {
+            if selectedScope == .past {
+                return $0.date > $1.date
+            }
+
+            return $0.nextOccurrence < $1.nextOccurrence
+        }
+    }
+
+    private var filteredDays: [SpecialDay] {
+        switch selectedScope {
+        case .current:
+            return specialDays.filter { !$0.isPastSingleEvent }
+        case .past:
+            return specialDays.filter(\.isPastSingleEvent)
+        }
+    }
+
+    private var emptyTitle: String {
+        selectedScope == .current ? "Chưa có ngày" : "Chưa có ngày đã qua"
+    }
+
+    private var emptyMessage: String {
+        selectedScope == .current ? "Thêm những mốc cần nhớ." : "Các sự kiện một lần đã qua sẽ nằm ở đây."
     }
 
     var body: some View {
@@ -29,11 +60,18 @@ struct SpecialDaysView: View {
                             isShowingLunarCalendar = true
                         }
 
+                        Picker("Nhóm ngày", selection: $selectedScope) {
+                            ForEach(DayScope.allCases) { scope in
+                                Text(scope.rawValue).tag(scope)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
                         if sortedDays.isEmpty {
                             EmptyActionView(
                                 icon: "calendar.badge.plus",
-                                title: "Chưa có ngày",
-                                message: "Thêm những mốc cần nhớ.",
+                                title: emptyTitle,
+                                message: emptyMessage,
                                 actionTitle: "Thêm",
                                 action: onAddDay
                             )
@@ -527,7 +565,7 @@ struct SpecialDayListCard: View {
     let onDelete: () -> Void
 
     private var nextDate: Date {
-        day.date.nextAnnualOccurrence()
+        day.nextOccurrence
     }
 
     private var daysUntil: Int {
@@ -535,15 +573,31 @@ struct SpecialDayListCard: View {
     }
 
     private var counterText: String {
-        daysUntil == 0 ? "Hôm nay" : "\(daysUntil)"
+        if daysUntil == 0 {
+            return "Hôm nay"
+        } else if daysUntil < 0 {
+            return "\(abs(daysUntil))"
+        } else {
+            return "\(daysUntil)"
+        }
     }
 
     private var counterCaption: String {
-        daysUntil == 0 ? "đến rồi" : "ngày nữa"
+        if daysUntil == 0 {
+            return "đến rồi"
+        } else if daysUntil < 0 {
+            return "ngày trước"
+        } else {
+            return "ngày nữa"
+        }
     }
 
     private var lunarDateText: String {
         nextDate.shortLunarDateText
+    }
+
+    private var reminderOptions: [SpecialDayReminderOption] {
+        day.reminderOptions
     }
 
     var body: some View {
@@ -577,7 +631,7 @@ struct SpecialDayListCard: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.pink)
 
-                    Text("Hằng năm")
+                    Text(day.recurrence.rawValue)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 8)
@@ -591,16 +645,18 @@ struct SpecialDayListCard: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 54), spacing: 5)], alignment: .leading, spacing: 5) {
-                    ForEach(["1 tháng", "7 ngày", "3 ngày", "1 ngày"], id: \.self) { reminder in
-                        Text(reminder)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.pink)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(Color.pink.opacity(0.1), in: Capsule())
+                if !reminderOptions.isEmpty {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 54), spacing: 5)], alignment: .leading, spacing: 5) {
+                        ForEach(reminderOptions) { option in
+                            Text(option.shortTitle)
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.pink)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(Color.pink.opacity(0.1), in: Capsule())
+                        }
                     }
                 }
             }
@@ -756,7 +812,7 @@ struct UpcomingSpecialDayRow: View {
 
             Spacer(minLength: 8)
 
-            Text(day.date.nextAnnualOccurrence().relativeDayText)
+            Text(day.nextOccurrence.relativeDayText)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(.pink)
                 .lineLimit(1)

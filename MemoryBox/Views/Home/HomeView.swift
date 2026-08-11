@@ -241,7 +241,7 @@ struct HomeView: View {
                 MiniInfoCard(
                     icon: upcomingDay.symbolName,
                     title: upcomingDay.title,
-                    subtitle: upcomingDay.date.nextAnnualOccurrence().relativeDayText
+                    subtitle: upcomingDay.nextOccurrence.relativeDayText
                 )
             }
         }
