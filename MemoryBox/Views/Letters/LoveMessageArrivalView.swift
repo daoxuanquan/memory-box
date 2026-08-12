@@ -36,18 +36,10 @@ struct LoveMessageArrivalView: View {
         message.senderRole
     }
 
-    private var isAngryTheme: Bool {
-        message.mood == .angry
-    }
-
-    private var themeColor: Color {
-        isAngryTheme ? .red : .pink
-    }
+    private var themeColor: Color { .pink }
 
     private var bloomSymbols: [String] {
-        isAngryTheme
-            ? ["flame.fill", "bolt.fill", "exclamationmark.triangle.fill", "flame.fill", "bolt.fill", "flame.fill", "hand.raised.fill", "flame.fill", "bolt.fill", "flame.fill", "exclamationmark.triangle.fill", "flame.fill"]
-            : ["heart.fill", "sparkles", "heart.circle.fill", "sparkle", "heart.fill", "star.fill", "heart.fill", "sparkles", "heart.circle.fill", "sparkle", "heart.fill", "moon.stars.fill"]
+        ["heart.fill", "sparkles", "heart.circle.fill", "sparkle", "heart.fill", "star.fill", "heart.fill", "sparkles", "heart.circle.fill", "sparkle", "heart.fill", "moon.stars.fill"]
     }
 
     var body: some View {
@@ -96,18 +88,12 @@ struct LoveMessageArrivalView: View {
         ZStack {
             if phase == .revealed || phase == .blooming {
                 LinearGradient(
-                    colors: isAngryTheme
-                        ? [
-                            Color.black.opacity(0.96),
-                            Color.red.opacity(0.82),
-                            Color.orange.opacity(0.68)
-                        ]
-                        : [
-                            Color.pink.opacity(0.92),
-                            Color.purple.opacity(0.72),
-                            Color.orange.opacity(0.52),
-                            Color.white.opacity(0.92)
-                        ],
+                    colors: [
+                        Color.pink.opacity(0.92),
+                        Color.purple.opacity(0.72),
+                        Color.orange.opacity(0.52),
+                        Color.white.opacity(0.92)
+                    ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -195,8 +181,8 @@ struct LoveMessageArrivalView: View {
     private var bloomStage: some View {
         SwiftUI.TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { context in
             let elapsed = context.date.timeIntervalSince(bloomStartedAt)
-            let spin = elapsed * (isAngryTheme ? 280 : 160)
-            let bob = sin(elapsed * (isAngryTheme ? 8 : 4.5))
+            let spin = elapsed * 160
+            let bob = sin(elapsed * 4.5)
 
             ZStack {
                 ForEach(Array(bloomSymbols.enumerated()), id: \.offset) { index, symbol in
@@ -239,28 +225,24 @@ struct LoveMessageArrivalView: View {
                         .scaleEffect(centerPulse ? 1.18 : 0.88)
                         .opacity(0.85)
 
-                    Image(systemName: envelopeOpen
-                          ? (isAngryTheme ? "flame.fill" : "heart.circle.fill")
-                          : "envelope.fill")
+                    Image(systemName: envelopeOpen ? "heart.circle.fill" : "envelope.fill")
                         .font(.system(size: envelopeOpen ? 72 : 54, weight: .semibold))
                         .foregroundStyle(
                             LinearGradient(
-                                colors: isAngryTheme
-                                    ? [.red, .orange, .yellow]
-                                    : [.pink, .purple, .orange.opacity(0.8)],
+                                colors: [.pink, .purple, .orange.opacity(0.8)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .rotationEffect(.degrees(isAngryTheme ? spin * 0.25 : bob * 8))
+                        .rotationEffect(.degrees(bob * 8))
                         .scaleEffect(envelopeOpen ? (centerPulse ? 1.14 : 1.0) : 0.92)
-                        .offset(y: CGFloat(bob) * (isAngryTheme ? 4 : 6))
+                        .offset(y: CGFloat(bob) * 6)
                         .shadow(color: themeColor.opacity(0.55), radius: centerPulse ? 28 : 14, y: 8)
                 }
 
                 VStack {
                     Spacer()
-                    Text(isAngryTheme ? "Đang bung lửa..." : "Đang nở hoa...")
+                    Text("Đang nở hoa...")
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
                         .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
@@ -358,7 +340,7 @@ struct LoveMessageArrivalView: View {
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(themeColor.opacity(isAngryTheme ? 0.10 : 0.08))
+                .fill(themeColor.opacity(0.08))
         )
 
         ViewThatFits(in: .vertical) {
@@ -379,8 +361,8 @@ struct LoveMessageArrivalView: View {
                     .fill(
                         LinearGradient(
                             colors: [
-                                themeColor.opacity(isAngryTheme ? 0.14 : 0.10),
-                                (isAngryTheme ? Color.orange : Color.purple).opacity(0.06)
+                                themeColor.opacity(0.10),
+                                Color.purple.opacity(0.06)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -405,22 +387,17 @@ struct LoveMessageArrivalView: View {
     }
 
     private func particleColor(for index: Int) -> Color {
-        if isAngryTheme {
-            return [Color.red, Color.orange, Color.yellow.opacity(0.9), Color.red.opacity(0.85)][index % 4]
-        }
-        return [Color.pink, Color.purple.opacity(0.9), Color.white, Color.orange.opacity(0.85)][index % 4]
+        [Color.pink, Color.purple.opacity(0.9), Color.white, Color.orange.opacity(0.85)][index % 4]
     }
 
     private func particleOffset(for index: Int, spinDegrees: Double, bob: Double) -> CGSize {
         let angle = Double(index) / Double(bloomSymbols.count) * 2 * .pi
-            + spinDegrees * .pi / 180 * (isAngryTheme ? 0.55 : 0.28)
-        let baseRadius: CGFloat = isAngryTheme ? 118 : 108
+            + spinDegrees * .pi / 180 * 0.28
+        let baseRadius: CGFloat = 108
         let radius = particlesLaunched
             ? baseRadius * bloomProgress + CGFloat(index % 3) * 18 + CGFloat(bob) * 6
             : 8
-        let lift: CGFloat = isAngryTheme
-            ? CGFloat(bob) * 8
-            : -bloomProgress * 36 + CGFloat(bob) * 10
+        let lift: CGFloat = -bloomProgress * 36 + CGFloat(bob) * 10
         return CGSize(
             width: CGFloat(cos(angle)) * radius,
             height: CGFloat(sin(angle)) * radius + lift
@@ -429,7 +406,7 @@ struct LoveMessageArrivalView: View {
 
     private func particleRotation(for index: Int, spinDegrees: Double) -> Double {
         let base = Double(index) * 30
-        return particlesLaunched ? base + spinDegrees * (isAngryTheme ? 1.4 : 0.8) : base
+        return particlesLaunched ? base + spinDegrees * 0.8 : base
     }
 
     private func particleOpacity(for index: Int) -> Double {
@@ -481,7 +458,7 @@ struct LoveMessageArrivalView: View {
             bloomProgress = 1
         }
 
-        withAnimation(.easeInOut(duration: isAngryTheme ? 0.32 : 0.5).repeatForever(autoreverses: true)) {
+        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
             centerPulse = true
         }
 

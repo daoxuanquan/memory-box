@@ -588,10 +588,24 @@ enum MemoryStore {
     }
 
     static func notifyAfterRemoteImportIfNeeded() async {
-        let messages = await loadLoveMessages()
-        if !unreadIncomingMessages(from: messages).isEmpty {
+        await notifyUnreadIncomingIfNeeded(alsoNotifyGenericUpdate: true)
+    }
+
+    /// Gọi 1 lần khi mở app — chỉ báo nếu có tin nhắn đến chưa đọc.
+    static func notifyUnreadOnLaunchIfNeeded() async {
+        await notifyUnreadIncomingIfNeeded(alsoNotifyGenericUpdate: false)
+    }
+
+    private static var sessionNotifiedUnreadMessageIDs: Set<UUID> = []
+
+    private static func notifyUnreadIncomingIfNeeded(alsoNotifyGenericUpdate: Bool) async {
+        let unread = unreadIncomingMessages(from: await loadLoveMessages())
+        let fresh = unread.filter { !sessionNotifiedUnreadMessageIDs.contains($0.id) }
+
+        if !fresh.isEmpty {
+            fresh.forEach { sessionNotifiedUnreadMessageIDs.insert($0.id) }
             await LoveNotificationScheduler.notifyNewLoveMessage()
-        } else {
+        } else if alsoNotifyGenericUpdate {
             await LoveNotificationScheduler.notifyRemoteCoupleUpdate()
         }
     }

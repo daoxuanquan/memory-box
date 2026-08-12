@@ -761,7 +761,7 @@ struct UpcomingSpecialDaysPreview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Ngày sắp tới", systemImage: "calendar.circle.fill")
+                Label("Upcoming events", systemImage: "calendar.circle.fill")
                     .font(.headline)
                     .foregroundStyle(.primary)
 

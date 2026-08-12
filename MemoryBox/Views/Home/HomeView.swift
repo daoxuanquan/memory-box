@@ -17,11 +17,8 @@ struct HomeView: View {
     let upcomingDay: SpecialDay?
     let upcomingDays: [SpecialDay]
     let hasUserContent: Bool
-    let showInvitePartnerBanner: Bool
     let showSyncingBanner: Bool
     let onAddMemory: () -> Void
-    let onInvitePartner: () -> Void
-    let onDismissInvitePartnerBanner: () -> Void
     let onOpenSettings: () -> Void
     let onEditProfile: (ProfilePerson) -> Void
     let onSetRelationshipStart: (Date) -> Void
@@ -29,7 +26,6 @@ struct HomeView: View {
     let onDeleteMemory: (UUID) -> Void
     @State private var draftRelationshipStart = Date()
     @State private var showingStartDateEditor = false
-    @State private var confirmingStartDateChange = false
     @State private var daysScale = 1.0
 
     var body: some View {
@@ -40,10 +36,6 @@ struct HomeView: View {
 
                 ScrollView {
                     VStack(alignment: .center, spacing: 26) {
-                        if showInvitePartnerBanner {
-                            InvitePartnerBanner(onInvite: onInvitePartner, onDismiss: onDismissInvitePartnerBanner)
-                        }
-
                         if showSyncingBanner {
                             CloudSyncingBanner()
                         }
@@ -129,15 +121,6 @@ struct HomeView: View {
                         await runDaysHeartbeat()
                     }
 
-                Button {
-                    openStartDateEditor()
-                } label: {
-                    Label("Đổi ngày bắt đầu", systemImage: "calendar")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
                 DurationBreakdownView(daysTogether: max(daysTogether, 0))
             } else {
                 Text("Chưa đặt ngày bắt đầu")
@@ -145,9 +128,10 @@ struct HomeView: View {
                     .foregroundStyle(.primary)
 
                 Button {
-                    openStartDateEditor()
+                    draftRelationshipStart = Date()
+                    showingStartDateEditor = true
                 } label: {
-                    Label("Đặt ngày yêu nhau", systemImage: "calendar.badge.plus")
+                    Label("Đặt ngày bên nhau", systemImage: "calendar.badge.plus")
                         .font(.headline)
                 }
                 .buttonStyle(.borderedProminent)
@@ -170,7 +154,7 @@ struct HomeView: View {
             }
             .padding(20)
             .background(AnimatedLoveBackdrop().ignoresSafeArea())
-            .navigationTitle(hasRelationshipStart ? "Đổi ngày" : "Đặt ngày")
+            .navigationTitle("Đặt ngày")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -181,37 +165,12 @@ struct HomeView: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Lưu") {
-                        saveDraftStartDate()
+                        onSetRelationshipStart(draftRelationshipStart)
+                        showingStartDateEditor = false
                     }
                 }
             }
-            .alert("Đổi ngày bắt đầu?", isPresented: $confirmingStartDateChange) {
-                Button("Hủy", role: .cancel) { }
-                Button("Đổi ngày", role: .destructive) {
-                    commitDraftStartDate()
-                }
-            } message: {
-                Text("Việc này sẽ tính lại số ngày yêu nhau trên trang chủ.")
-            }
         }
-    }
-
-    private func openStartDateEditor() {
-        draftRelationshipStart = hasRelationshipStart ? relationshipStart : Date()
-        showingStartDateEditor = true
-    }
-
-    private func saveDraftStartDate() {
-        if hasRelationshipStart && draftRelationshipStart.startOfDay != relationshipStart.startOfDay {
-            confirmingStartDateChange = true
-        } else {
-            commitDraftStartDate()
-        }
-    }
-
-    private func commitDraftStartDate() {
-        onSetRelationshipStart(draftRelationshipStart)
-        showingStartDateEditor = false
     }
 
     @MainActor
@@ -239,27 +198,6 @@ struct HomeView: View {
         }
     }
 
-    private var quickActions: some View {
-        HStack(spacing: 12) {
-            Button(action: onAddMemory) {
-                Image(systemName: "plus")
-                    .font(.title3.weight(.bold))
-                    .frame(width: 56, height: 56)
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityLabel("Thêm kỷ niệm")
-
-            if let upcomingDay {
-                MiniInfoCard(
-                    icon: upcomingDay.symbolName,
-                    title: upcomingDay.title,
-                    subtitle: upcomingDay.nextOccurrence.relativeDayText
-                )
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
     private var recentMemoryStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
@@ -278,57 +216,6 @@ struct HomeView: View {
             }
             .padding(.vertical, 2)
         }
-    }
-}
-
-struct InvitePartnerBanner: View {
-    let onInvite: () -> Void
-    let onDismiss: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "heart.circle.fill")
-                .font(.title2)
-                .foregroundStyle(.pink)
-                .frame(width: 40, height: 40)
-                .background(Color.pink.opacity(0.1), in: Circle())
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Mời người ấy đồng bộ kỷ niệm")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-
-                Text("Gửi link để cùng dùng một MemoryBox.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 8)
-
-            Button("Mời ngay", action: onInvite)
-                .font(.caption.weight(.bold))
-                .buttonStyle(.borderedProminent)
-                .tint(.pink)
-
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.caption.weight(.bold))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Ẩn lời nhắc")
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.52), lineWidth: 1)
-        )
     }
 }
 

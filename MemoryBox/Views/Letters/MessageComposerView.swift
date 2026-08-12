@@ -15,7 +15,6 @@ struct MessageComposerView: View {
     let onSend: (LoveMessageDraft) -> Void
 
     @State private var message = ""
-    @State private var mood: MessageMood = .sweet
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var imageData: Data?
     @FocusState private var isMessageFocused: Bool
@@ -37,20 +36,17 @@ struct MessageComposerView: View {
                 ScrollView {
                     VStack(spacing: 14) {
                         replyPreview
-                        HStack {
-                            Text("Gửi tới \(recipientName)")
-                                .font(.subheadline.weight(.semibold))
 
-                            Spacer()
+                        Text("Gửi tới \(recipientName)")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                            themePicker
-                        }
                         messageCard
                     }
                     .padding(20)
                 }
             }
-            .navigationTitle(editingMessage == nil ? "Gửi yêu thương" : "Sửa tin nhắn")
+            .navigationTitle(editingMessage == nil ? "Gửi tin nhắn" : "Sửa tin nhắn")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -68,7 +64,6 @@ struct MessageComposerView: View {
             .onAppear {
                 if let editingMessage {
                     message = editingMessage.message
-                    mood = editingMessage.mood == .angry ? .angry : .sweet
                     imageData = editingMessage.imageData
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -81,38 +76,27 @@ struct MessageComposerView: View {
                     imageData = ImageFileStore.compressedJPEGData(from: data)
                 }
             }
-            .animation(.easeInOut(duration: 0.35), value: mood)
         }
     }
 
     private var themeBackground: some View {
         ZStack {
             LinearGradient(
-                colors: mood == .angry
-                    ? [
-                        Color.red.opacity(0.32),
-                        Color.orange.opacity(0.24),
-                        Color.black.opacity(0.08),
-                        Color.white.opacity(0.72)
-                    ]
-                    : [
-                        Color.pink.opacity(0.27),
-                        Color.purple.opacity(0.16),
-                        Color.orange.opacity(0.12),
-                        Color.white.opacity(0.76)
-                    ],
+                colors: [
+                    Color.pink.opacity(0.27),
+                    Color.purple.opacity(0.16),
+                    Color.orange.opacity(0.12),
+                    Color.white.opacity(0.76)
+                ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
 
             GeometryReader { proxy in
                 ForEach(0..<6, id: \.self) { index in
-                    Image(systemName: mood == .angry ? "flame.fill" : "heart.fill")
+                    Image(systemName: "heart.fill")
                         .font(.system(size: index.isMultiple(of: 2) ? 30 : 20))
-                        .foregroundStyle(
-                            (mood == .angry ? Color.red : Color.pink)
-                                .opacity(index.isMultiple(of: 2) ? 0.18 : 0.12)
-                        )
+                        .foregroundStyle(Color.pink.opacity(index.isMultiple(of: 2) ? 0.18 : 0.12))
                         .position(
                             x: proxy.size.width * CGFloat([0.12, 0.3, 0.52, 0.72, 0.88, 0.42][index]),
                             y: proxy.size.height * CGFloat([0.18, 0.72, 0.32, 0.82, 0.16, 0.55][index])
@@ -135,7 +119,7 @@ struct MessageComposerView: View {
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.pink)
 
-                    Text(replyTo.message.trimmed.isEmpty ? "Ảnh yêu thương" : replyTo.message)
+                    Text(replyTo.message.trimmed.isEmpty ? "Ảnh đính kèm" : replyTo.message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -145,30 +129,6 @@ struct MessageComposerView: View {
             }
             .padding(14)
             .background(composerCardBackground)
-        }
-    }
-
-    private var themePicker: some View {
-        Menu {
-            Button {
-                mood = .sweet
-            } label: {
-                Label("Ngọt ngào", systemImage: MessageMood.sweet.icon)
-            }
-
-            Button {
-                mood = .angry
-            } label: {
-                Label("Giận dữ", systemImage: MessageMood.angry.icon)
-            }
-        } label: {
-            Label(mood == .angry ? "Giận dữ" : "Ngọt ngào", systemImage: mood == .angry ? MessageMood.angry.icon : MessageMood.sweet.icon)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(mood == .angry ? Color.red : Color.pink)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background((mood == .angry ? Color.red : Color.pink).opacity(0.12))
-                .clipShape(Capsule())
         }
     }
 
@@ -195,17 +155,9 @@ struct MessageComposerView: View {
             .background(Color.white.opacity(0.72))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-            HStack {
-                PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                    Label(imageData == nil ? "Đính kèm ảnh" : "Đổi ảnh", systemImage: "paperclip")
-                        .font(.subheadline.weight(.semibold))
-                }
-
-                Spacer()
-
-                Text(mood == .angry ? "Chủ đề giận dữ" : "Chủ đề ngọt ngào")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                Label(imageData == nil ? "Đính kèm ảnh" : "Đổi ảnh", systemImage: "paperclip")
+                    .font(.subheadline.weight(.semibold))
             }
 
             if let imageData, let uiImage = UIImage(data: imageData) {
@@ -256,7 +208,7 @@ struct MessageComposerView: View {
         onSend(
             LoveMessageDraft(
                 message: message,
-                mood: mood,
+                mood: .sweet,
                 imageData: imageData,
                 replyToID: replyTo?.id
             )

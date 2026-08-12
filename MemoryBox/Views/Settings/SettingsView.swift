@@ -10,6 +10,9 @@ import UserNotifications
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.light.rawValue
+    let relationshipStart: Date
+    let hasRelationshipStart: Bool
+    let onSetRelationshipStart: (Date) -> Void
     @State private var inviteSheet: ShareInvitePayload?
     @State private var isPreparingShare = false
     @State private var shareErrorText: String?
@@ -19,10 +22,42 @@ struct SettingsView: View {
     @State private var selectedAppIcon: AppIconChoice = .dragonBulliesPig
     @State private var iconErrorText: String?
     @State private var showingLeaveConfirmation = false
+    @State private var draftRelationshipStart = Date()
+    @State private var showingStartDateEditor = false
+    @State private var confirmingStartDateChange = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Ngày bắt đầu") {
+                    if hasRelationshipStart {
+                        LabeledContent(
+                            "Bên nhau",
+                            value: "\(max(Calendar.current.dateComponents([.day], from: relationshipStart.startOfDay, to: Date().startOfDay).day ?? 0, 0)) ngày"
+                        )
+                        LabeledContent(
+                            "Ngày bắt đầu",
+                            value: relationshipStart.formatted(date: .abbreviated, time: .omitted)
+                        )
+                        Button {
+                            draftRelationshipStart = relationshipStart
+                            showingStartDateEditor = true
+                        } label: {
+                            Label("Đổi ngày bắt đầu", systemImage: "calendar")
+                        }
+                    } else {
+                        Text("Chưa đặt ngày bắt đầu.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button {
+                            draftRelationshipStart = Date()
+                            showingStartDateEditor = true
+                        } label: {
+                            Label("Đặt ngày bên nhau", systemImage: "calendar.badge.plus")
+                        }
+                    }
+                }
+
                 Section("Đồng bộ cặp đôi") {
                     LabeledContent("Trạng thái", value: shareStatusText)
                     LabeledContent("iCloud", value: iCloudStatusText)
@@ -117,6 +152,44 @@ struct SettingsView: View {
             .sheet(item: $inviteSheet) { payload in
                 ShareInviteSheet(share: payload.share, container: payload.container)
             }
+            .sheet(isPresented: $showingStartDateEditor) {
+                NavigationStack {
+                    VStack(spacing: 24) {
+                        Image(systemName: "calendar.circle.fill")
+                            .font(.system(size: 54))
+                            .foregroundStyle(.pink)
+
+                        DatePicker("Ngày bắt đầu", selection: $draftRelationshipStart, displayedComponents: .date)
+                            .datePickerStyle(.graphical)
+                            .tint(.pink)
+                    }
+                    .padding(20)
+                    .background(AnimatedLoveBackdrop().ignoresSafeArea())
+                    .navigationTitle(hasRelationshipStart ? "Đổi ngày" : "Đặt ngày")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Hủy") {
+                                showingStartDateEditor = false
+                            }
+                        }
+
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Lưu") {
+                                saveDraftStartDate()
+                            }
+                        }
+                    }
+                    .alert("Đổi ngày bắt đầu?", isPresented: $confirmingStartDateChange) {
+                        Button("Hủy", role: .cancel) { }
+                        Button("Đổi ngày", role: .destructive) {
+                            commitDraftStartDate()
+                        }
+                    } message: {
+                        Text("Việc này sẽ tính lại số ngày bên nhau trên trang chủ.")
+                    }
+                }
+            }
             .alert("Không tạo được link chia sẻ", isPresented: shareErrorBinding) {
                 Button("Đóng", role: .cancel) { shareErrorText = nil }
             } message: {
@@ -147,6 +220,19 @@ struct SettingsView: View {
                 await refreshNotificationPermission(requestIfNeeded: false)
             }
         }
+    }
+
+    private func saveDraftStartDate() {
+        if hasRelationshipStart && draftRelationshipStart.startOfDay != relationshipStart.startOfDay {
+            confirmingStartDateChange = true
+        } else {
+            commitDraftStartDate()
+        }
+    }
+
+    private func commitDraftStartDate() {
+        onSetRelationshipStart(draftRelationshipStart)
+        showingStartDateEditor = false
     }
 
     private var iconErrorBinding: Binding<Bool> {
@@ -318,5 +404,9 @@ private extension CKAccountStatus {
 }
 
 #Preview {
-    SettingsView()
+    SettingsView(
+        relationshipStart: Date(),
+        hasRelationshipStart: false,
+        onSetRelationshipStart: { _ in }
+    )
 }

@@ -167,14 +167,30 @@ final class OnboardingCoordinatorViewModel {
     }
 
     func finishCurrentPath(onComplete: () -> Void) {
+        // Profile / start date are persisted only when the user edits those steps.
+        // Do not overwrite AppSettings here — same as memories (not re-saved on Done).
         OnboardingStore.save(role: finalMembership == .participant ? .second : .first)
-        MemoryStore.save(profile: profile)
-        MemoryStore.save(startDate: startDate, isSet: hasStartDate)
         OnboardingStore.complete(
             membership: finalMembership,
             activeDataSource: finalMembership == .participant ? .sharedInvite : .ownPrivate
         )
         onComplete()
+    }
+
+    func persistProfileDraftIfNeeded() {
+        let draftHasContent =
+            !profile.firstName.trimmed.isEmpty
+            || !profile.secondName.trimmed.isEmpty
+            || profile.firstImagePath != nil
+            || profile.secondImagePath != nil
+
+        guard draftHasContent else { return }
+        MemoryStore.save(profile: profile)
+    }
+
+    func persistStartDateDraftIfNeeded() {
+        guard hasStartDate else { return }
+        MemoryStore.save(startDate: startDate, isSet: true)
     }
 
     private func probePrivateDataForRestore() async {
@@ -221,7 +237,10 @@ final class OnboardingCoordinatorViewModel {
         OnboardingStore.save(role: .first)
         role = .first
         MemoryStore.save(onboardingCompleted: true)
-        step = .done
+        Task {
+            await loadDraftData()
+            step = .done
+        }
     }
 
     private func continueImportAfterICloudCheck() async {

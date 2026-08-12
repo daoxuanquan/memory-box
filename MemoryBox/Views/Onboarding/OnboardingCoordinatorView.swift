@@ -148,7 +148,7 @@ struct OnboardingCoordinatorView: View {
                 get: { viewModel.profile },
                 set: { viewModel.profile = $0 }
             )) {
-                MemoryStore.save(profile: viewModel.profile)
+                viewModel.persistProfileDraftIfNeeded()
                 viewModel.step = .startDate
             } onBack: {
                 viewModel.step = .welcome
@@ -161,13 +161,13 @@ struct OnboardingCoordinatorView: View {
                 get: { viewModel.hasStartDate },
                 set: { viewModel.hasStartDate = $0 }
             )) {
-                MemoryStore.save(startDate: viewModel.startDate, isSet: viewModel.hasStartDate)
+                viewModel.persistStartDateDraftIfNeeded()
                 viewModel.step = .done
             } onBack: {
                 viewModel.step = .profile
             }
         case .done:
-            OnboardingDoneView(path: viewModel.path ?? .setupOwn) {
+            OnboardingDoneView {
                 viewModel.finishCurrentPath(onComplete: onComplete)
             }
         }
@@ -184,7 +184,7 @@ struct LocalDataAbandonConfirmView: View {
             OnboardingBackButton(action: onBack)
             OnboardingTitle(
                 title: "Dữ liệu trên máy này sẽ không dùng nữa",
-                subtitle: "Bạn đang có kỷ niệm hoặc tin nhắn trên máy này. Khi tham gia link mời, app sẽ dùng dữ liệu của không gian chia sẻ và không gộp dữ liệu cũ."
+                subtitle: "App sẽ dùng không gian chia sẻ. Dữ liệu cũ trên máy không được gộp."
             )
 
             Spacer()
@@ -305,7 +305,7 @@ struct JoinExplainView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             OnboardingBackButton(action: onBack)
-            OnboardingTitle(title: "Nhập từ link được mời", subtitle: "1. Mở link người ấy gửi\n2. Nhấn Accept / Chấp nhận trên màn hình iOS\n3. Quay lại MemoryBox")
+            OnboardingTitle(title: "Nhập từ link được mời", subtitle: "Mở link mời, nhấn Chấp nhận, rồi quay lại đây.")
 
             Button(action: openClipboardLink) {
                 Label("Mở link trong Clipboard", systemImage: "link")
@@ -331,9 +331,6 @@ struct JoinExplainView: View {
             .tint(.pink)
             .disabled(isChecking)
 
-            Text("Nếu chưa thấy không gian chia sẻ, hãy mở lại link mời và đảm bảo iCloud đang đăng nhập đúng Apple ID.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(.vertical, 16)
@@ -484,7 +481,6 @@ struct JoinResultView: View {
 }
 
 struct OnboardingDoneView: View {
-    let path: OnboardingPath
     let onStart: () -> Void
 
     var body: some View {
@@ -495,25 +491,10 @@ struct OnboardingDoneView: View {
                 .foregroundStyle(.pink)
             Text("Tất cả đã sẵn sàng")
                 .font(.title2.bold())
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
             Spacer()
             OnboardingPrimaryButton(title: "Bắt đầu", systemImage: "arrow.right", action: onStart)
         }
         .padding(.vertical, 16)
-    }
-
-    private var subtitle: String {
-        switch path {
-        case .setupOwn:
-            return "Bạn có thể mời người ấy bất cứ lúc nào trong Cài đặt."
-        case .restoreOwn:
-            return "Dữ liệu cũ đã được tải từ không gian riêng."
-        case .importFromLink:
-            return "Kỷ niệm và tin nhắn sẽ đồng bộ qua iCloud."
-        }
     }
 }
 

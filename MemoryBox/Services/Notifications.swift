@@ -48,8 +48,8 @@ enum LoveNotificationScheduler {
         guard await ensureAuthorization() else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "Có tin nhắn yêu thương"
-        content.body = "Bạn có một tin nhắn yêu thương đang chờ bạn mở."
+        content.title = "Có tin nhắn mới"
+        content.body = "Bạn có một tin nhắn đang chờ bạn mở."
         content.sound = .default
         content.categoryIdentifier = "MEMORYBOX_LOVE_MESSAGE"
 

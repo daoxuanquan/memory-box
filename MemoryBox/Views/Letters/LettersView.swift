@@ -76,7 +76,7 @@ struct LettersView: View {
                 Text(partnerName)
                     .font(.headline)
 
-                Text("Hộp thư yêu thương của hai bạn")
+                Text("Tin nhắn của hai bạn")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -103,7 +103,7 @@ struct LettersView: View {
             EmptyActionView(
                 icon: "heart.text.square.fill",
                 title: "Chưa có tin nhắn",
-                message: "Gửi lời yêu thương đầu tiên để người ấy nhận được popup đặc biệt khi mở app.",
+                message: "Gửi tin nhắn đầu tiên để người ấy nhận được popup đặc biệt khi mở app.",
                 actionTitle: "Viết tin nhắn",
                 action: openComposer
             )
@@ -160,7 +160,7 @@ struct LettersView: View {
                 Image(systemName: "heart.fill")
                     .foregroundStyle(.pink)
 
-                Text("Viết lời yêu thương...")
+                Text("Viết tin nhắn...")
                     .foregroundStyle(.secondary)
 
                 Spacer()
@@ -241,14 +241,6 @@ struct LoveMessageBubble: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 6) {
-                        Image(systemName: message.mood.icon)
-                            .font(.caption2)
-                        Text(message.mood.rawValue)
-                            .font(.caption2.weight(.bold))
-                    }
-                    .foregroundStyle(isMine ? .white.opacity(0.9) : message.mood.color)
-
                     if message.hasImage, let data = message.imageData, let uiImage = UIImage(data: data) {
                         Image(uiImage: uiImage)
                             .resizable()
@@ -353,7 +345,7 @@ struct LoveMessageBubble: View {
                 .fill(isMine ? Color.white.opacity(0.8) : Color.pink)
                 .frame(width: 3)
 
-            Text(reply.message.trimmed.isEmpty ? "Ảnh yêu thương" : reply.message)
+            Text(reply.message.trimmed.isEmpty ? "Ảnh đính kèm" : reply.message)
                 .font(.caption2)
                 .foregroundStyle(isMine ? .white.opacity(0.85) : .secondary)
                 .lineLimit(2)

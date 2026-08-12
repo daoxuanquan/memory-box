@@ -52,11 +52,6 @@ struct WelcomeView: View {
                 .buttonStyle(.bordered)
             }
 
-            Text("Tự thiết lập: bắt đầu mới trên máy này, sau đó có thể mời người ấy.\nTải dữ liệu cũ: khôi phục kỷ niệm đã có trên máy / iCloud.\nNhập link: dùng không gian người ấy đã mời.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
             Spacer()
         }
     }

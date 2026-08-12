@@ -14,13 +14,13 @@ struct ContentView: View {
     @State private var specialDays: [SpecialDay] = []
     @State private var profile: CoupleProfile = .empty
     @State private var spaceMembership = MemoryStore.loadSpaceMembership()
-    @State private var showInvitePartnerBanner = OnboardingStore.shouldShowInviteBanner(membership: MemoryStore.loadSpaceMembership())
     @State private var relationshipStart = MemoryStore.loadStartDate()
     @State private var hasRelationshipStart = MemoryStore.loadHasStartDate()
     @State private var activeSheet: ActiveSheet?
     @State private var arrivalQueue: [LoveMessage] = []
     @State private var presentedArrivalMessage: LoveMessage?
     @State private var acknowledgedArrivalIDs: Set<UUID> = []
+    @State private var didRunLaunchMessageCheck = false
 
     private var daysTogether: Int {
         guard hasRelationshipStart else { return 0 }
@@ -109,11 +109,8 @@ struct ContentView: View {
             upcomingDay: nextSpecialDay,
             upcomingDays: upcomingSpecialDays,
             hasUserContent: hasUserContent,
-            showInvitePartnerBanner: showInvitePartnerBanner,
             showSyncingBanner: showSyncingBanner,
             onAddMemory: showAddMemory,
-            onInvitePartner: showSettings,
-            onDismissInvitePartnerBanner: dismissInvitePartnerBanner,
             onOpenSettings: showSettings,
             onEditProfile: showEditProfile,
             onSetRelationshipStart: saveRelationshipStart,
@@ -175,7 +172,11 @@ struct ContentView: View {
         case .profile(let person):
             EditProfileView(profile: profile, person: person, onSave: saveProfile)
         case .settings:
-            SettingsView()
+            SettingsView(
+                relationshipStart: relationshipStart,
+                hasRelationshipStart: hasRelationshipStart,
+                onSetRelationshipStart: saveRelationshipStart
+            )
         }
     }
 
@@ -279,12 +280,18 @@ struct ContentView: View {
         specialDays = await loadedSpecialDays
         profile = await loadedProfile
         spaceMembership = MemoryStore.loadSpaceMembership()
-        showInvitePartnerBanner = OnboardingStore.shouldShowInviteBanner(membership: spaceMembership)
         relationshipStart = MemoryStore.loadStartDate()
         hasRelationshipStart = MemoryStore.loadHasStartDate()
         _ = await AppIconManager.setIcon(MemoryStore.loadAppIconChoice())
         refreshNotificationSchedule()
         refreshArrivalQueue()
+        await checkUnreadMessagesOnLaunchIfNeeded()
+    }
+
+    private func checkUnreadMessagesOnLaunchIfNeeded() async {
+        guard !didRunLaunchMessageCheck else { return }
+        didRunLaunchMessageCheck = true
+        await MemoryStore.notifyUnreadOnLaunchIfNeeded()
     }
 
     private func reloadMessages() async {
@@ -334,13 +341,6 @@ struct ContentView: View {
                     presentedArrivalMessage = next
                 }
             }
-        }
-    }
-
-    private func dismissInvitePartnerBanner() {
-        OnboardingStore.dismissInviteBanner()
-        withAnimation(.easeOut(duration: 0.18)) {
-            showInvitePartnerBanner = false
         }
     }
 

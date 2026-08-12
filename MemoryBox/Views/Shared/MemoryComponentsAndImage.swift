@@ -68,8 +68,41 @@ enum MemoryPhotoCardStyle {
             return .title2.bold()
         case .collage:
             return .subheadline.weight(.bold)
+        case .compact:
+            return .system(size: 14, weight: .bold)
         default:
             return .headline
+        }
+    }
+
+    var metaFont: Font {
+        switch self {
+        case .compact:
+            return .system(size: 10, weight: .semibold)
+        default:
+            return .caption2.weight(.bold)
+        }
+    }
+
+    var captionPadding: CGFloat {
+        switch self {
+        case .collage:
+            return 10
+        case .compact:
+            return 8
+        default:
+            return 12
+        }
+    }
+
+    var titleLineLimit: Int {
+        switch self {
+        case .collage:
+            return 1
+        case .compact:
+            return 2
+        default:
+            return 2
         }
     }
 }
@@ -80,52 +113,125 @@ struct MemoryPhotoCard: View {
     var rotatesImages: Bool = false
     @State private var imageIndex = 0
 
+    private var imageCount: Int {
+        max(memory.imagePaths.count, 1)
+    }
+
     private var visibleImagePath: String? {
         guard !memory.imagePaths.isEmpty else { return nil }
         return memory.imagePaths[imageIndex % memory.imagePaths.count]
     }
 
+    /// Cứ 2 ảnh ẩn ngày/tháng thì 1 ảnh hiện (show → hide → hide → …).
+    private var showsCaption: Bool {
+        !rotatesImages || imageIndex % 3 == 0
+    }
+
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            MemoryVisual(memory: memory, imagePathOverride: visibleImagePath)
-                .id(visibleImagePath ?? "empty-\(memory.id.uuidString)")
-                .transition(.opacity.combined(with: .scale(scale: 1.03)))
-
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.62)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Label(memory.date.pastRelativeText, systemImage: memory.displayKind.icon)
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.white.opacity(0.9))
-
-                    Spacer()
-
-                    if memory.isFavorite {
-                        Image(systemName: "heart.fill")
-                            .font(.caption)
-                            .foregroundStyle(.white)
-                    }
-                }
-
-                Text(memory.title)
-                    .font(style.titleFont)
-                    .foregroundStyle(.white)
-                    .lineLimit(style == .collage ? 1 : 2)
-                    .minimumScaleFactor(0.78)
-            }
-            .padding(style == .collage ? 10 : 14)
+        ZStack {
+            rotatingImages
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+                .allowsHitTesting(false)
         }
         .applyMemoryPhotoCardFrame(style: style)
+        .overlay(alignment: .bottom) {
+            captionBar
+                .opacity(showsCaption ? 1 : 0)
+                .animation(.easeInOut(duration: 0.35), value: showsCaption)
+                .geometryGroup()
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .task(id: memory.imagePaths) {
             await rotateImagesIfNeeded()
         }
+    }
+
+    /// Ảnh xếp chồng cùng frame — chỉ đổi opacity, không insert/remove (tránh nhảy layout).
+    private var rotatingImages: some View {
+        ZStack {
+            if memory.imagePaths.isEmpty {
+                filledVisual(path: nil)
+            } else if rotatesImages, memory.imagePaths.count > 1 {
+                ForEach(Array(memory.imagePaths.enumerated()), id: \.offset) { index, path in
+                    filledVisual(path: path)
+                        .opacity(index == imageIndex % imageCount ? 1 : 0)
+                }
+            } else {
+                filledVisual(path: visibleImagePath)
+            }
+        }
+        .animation(.easeInOut(duration: 0.38), value: imageIndex)
+        .geometryGroup()
+    }
+
+    private func filledVisual(path: String?) -> some View {
+        MemoryVisual(memory: memory, imagePathOverride: path)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+    }
+
+    private var captionBar: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .center, spacing: 4) {
+                Image(systemName: memory.displayKind.icon)
+                    .font(style.metaFont)
+
+                Text(memory.date.pastRelativeText)
+                    .font(style.metaFont)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                if memory.isFavorite {
+                    Image(systemName: "heart.fill")
+                        .font(style.metaFont)
+                }
+            }
+            .foregroundStyle(.white.opacity(0.92))
+
+            Text(styledTitle)
+                .foregroundStyle(.white)
+                .lineLimit(style.titleLineLimit)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(style.captionPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.55), .black.opacity(0.72)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+    }
+
+    /// Title với line height sát (cách ~1pt), tránh bị cắt/lệch trên card nhỏ.
+    private var styledTitle: AttributedString {
+        var text = AttributedString(memory.title)
+        text.font = style.titleFont
+
+        let lineHeight: CGFloat
+        switch style {
+        case .compact:
+            lineHeight = 15
+        case .collage:
+            lineHeight = 16
+        case .featured:
+            lineHeight = 28
+        default:
+            lineHeight = 20
+        }
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = lineHeight
+        paragraph.maximumLineHeight = lineHeight
+        paragraph.lineBreakMode = .byTruncatingTail
+        text.paragraphStyle = paragraph
+        return text
     }
 
     @MainActor
@@ -135,12 +241,12 @@ struct MemoryPhotoCard: View {
 
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 2_500_000_000)
-            withAnimation(.easeInOut(duration: 0.38)) {
-                imageIndex = (imageIndex + 1) % memory.imagePaths.count
-            }
+            // Không withAnimation toàn cục — tránh kéo overlay lệch vị trí.
+            imageIndex = (imageIndex + 1) % memory.imagePaths.count
         }
     }
 }
+
 
 private extension View {
     @ViewBuilder
@@ -183,6 +289,7 @@ struct MemoryVisual: View {
                     .offset(x: 46, y: -36)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -195,6 +302,8 @@ struct StoredImageView: View {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
         } else {
             Color(.tertiarySystemFill)
         }
