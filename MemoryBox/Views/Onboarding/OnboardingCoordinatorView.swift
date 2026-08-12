@@ -11,6 +11,12 @@ struct RootCoordinatorView: View {
     @State private var showOnboarding = !OnboardingStore.onboardingCompleted
     @State private var joinResult: JoinResultPayload?
 
+    init() {
+        MemoryLog.bootstrap(
+            "RootCoordinatorView: showOnboarding=\(!OnboardingStore.onboardingCompleted) bootstrapped=\(PersistenceController.isBootstrapped)"
+        )
+    }
+
     var body: some View {
         Group {
             if showOnboarding {
@@ -77,9 +83,6 @@ struct OnboardingCoordinatorView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
-        .task {
-            await viewModel.loadDraftData()
-        }
         .sheet(isPresented: Binding(
             get: { viewModel.showICloudSheet },
             set: { viewModel.showICloudSheet = $0 }
@@ -92,6 +95,9 @@ struct OnboardingCoordinatorView: View {
             let success = notification.userInfo?["success"] as? Bool ?? false
             let error = notification.userInfo?["error"] as? String
             viewModel.handleShareAccept(success: success, error: error)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .restorePrivateDataDidArrive)) { _ in
+            viewModel.handleLateRestoreDataArrival()
         }
     }
 

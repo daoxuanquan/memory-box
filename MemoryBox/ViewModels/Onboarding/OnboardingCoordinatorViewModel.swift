@@ -71,19 +71,21 @@ final class OnboardingCoordinatorViewModel {
     }
 
     func startSetupOwnPath() {
+        PersistenceController.bootstrapIfNeeded()
         path = .setupOwn
         OnboardingStore.abortRestoreSession()
         OnboardingStore.abortImportSession()
         OnboardingStore.save(choice: .setupOwn)
         OnboardingStore.save(activeDataSource: .ownPrivate)
-        MemoryStore.save(spaceMembership: .ownLocal)
         OnboardingStore.save(role: .first)
         role = .first
-        MemoryStore.ensurePrivateCoupleSpace()
+        // Không tạo CoupleSpace / AppSettings ở đây — tránh export shell rỗng lên iCloud.
         step = .profile
     }
 
     func startRestoreOwnPath() {
+        MemoryLog.restore("startRestoreOwnPath: user chọn Tải dữ liệu cũ")
+        PersistenceController.bootstrapIfNeeded()
         path = .restoreOwn
         OnboardingStore.beginRestoreSession()
         step = .restoreDataLoading("Đang tìm dữ liệu trên máy...")
@@ -101,6 +103,7 @@ final class OnboardingCoordinatorViewModel {
     }
 
     func startImportPath() {
+        PersistenceController.bootstrapIfNeeded()
         path = .importFromLink
         if MemoryStore.hasLocalCoupleData() {
             step = .abandonLocalConfirm
@@ -156,6 +159,7 @@ final class OnboardingCoordinatorViewModel {
     }
 
     func handleShareAccept(success: Bool, error: String?) {
+        PersistenceController.bootstrapIfNeeded()
         if success {
             path = .importFromLink
             OnboardingStore.beginImportSession()
@@ -194,8 +198,13 @@ final class OnboardingCoordinatorViewModel {
     }
 
     private func probePrivateDataForRestore() async {
+        MemoryLog.restore("probePrivateDataForRestore: bắt đầu")
+        let probeStartedAt = Date()
         OnboardingStore.update(restorePhase: .probing)
+        MemoryStore.logPrivateStoreSnapshot(reason: "restore probe ban đầu")
+
         if MemoryStore.hasPrivateCoupleDataOnly() {
+            MemoryLog.restore("probePrivateDataForRestore: có data local ngay — finish")
             finishRestoreProbe()
             return
         }
@@ -203,12 +212,15 @@ final class OnboardingCoordinatorViewModel {
         let container = CKContainer(identifier: PersistenceController.cloudKitContainerIdentifier)
         do {
             let status = try await container.accountStatus()
+            MemoryLog.restore("probePrivateDataForRestore: iCloud accountStatus=\(status.rawValue)")
             guard status == .available else {
+                MemoryLog.restore("probePrivateDataForRestore: iCloud không available → lỗi")
                 OnboardingStore.update(restorePhase: .failed)
                 step = .restoreDataError(.icloudUnavailable)
                 return
             }
         } catch {
+            MemoryLog.restore("probePrivateDataForRestore: lỗi kiểm tra iCloud — \(error.localizedDescription)")
             OnboardingStore.update(restorePhase: .failed)
             step = .restoreDataError(.storeError)
             return
@@ -216,27 +228,79 @@ final class OnboardingCoordinatorViewModel {
 
         OnboardingStore.update(restorePhase: .syncingFromCloud)
         step = .restoreDataLoading("Đang đồng bộ từ iCloud...")
+        MemoryLog.restore("probePrivateDataForRestore: chờ CloudKit import (timeout 120s, batch import có thể đến muộn)")
 
-        let deadline = Date().addingTimeInterval(45)
+        let deadline = Date().addingTimeInterval(120)
+        var poll = 0
+        var lastSeenImportAt = probeStartedAt
+
         while Date() < deadline {
+            poll += 1
+
+            if let importAt = PersistenceController.lastCloudKitImportFinishedAt,
+               importAt > lastSeenImportAt {
+                lastSeenImportAt = importAt
+                MemoryLog.restore("probePrivateDataForRestore: CloudKit import batch mới — tiếp tục chờ")
+                step = .restoreDataLoading("Đang đồng bộ từ iCloud...")
+            }
+
             MemoryStore.reconcileAfterCloudSync()
             if MemoryStore.hasPrivateCoupleDataOnly() {
+                MemoryLog.restore("probePrivateDataForRestore: có data sau poll #\(poll) — finish")
                 finishRestoreProbe()
                 return
+            }
+
+            let elapsed = Date().timeIntervalSince(probeStartedAt)
+            let quietSinceLastImport = Date().timeIntervalSince(lastSeenImportAt)
+            // CloudKit thường import nhiều batch: batch đầu có thể rỗng, batch sau mới có kỷ niệm.
+            if PersistenceController.lastCloudKitImportFinishedAt != nil,
+               elapsed > 60,
+               quietSinceLastImport > 45 {
+                MemoryLog.restore(
+                    "probePrivateDataForRestore: không có import mới \(Int(quietSinceLastImport))s, vẫn không có data"
+                )
+                MemoryStore.logPrivateStoreSnapshot(reason: "sau import im lặng")
+                break
+            }
+
+            if poll % 5 == 0 {
+                MemoryLog.restore(
+                    "probePrivateDataForRestore: poll #\(poll) elapsed=\(Int(elapsed))s quiet=\(Int(quietSinceLastImport))s"
+                )
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
+        MemoryLog.restore("probePrivateDataForRestore: không tìm thấy dữ liệu cũ — restoreNotFound")
+        MemoryStore.logPrivateStoreSnapshot(reason: "restore timeout")
         OnboardingStore.update(restorePhase: .failed)
         step = .restoreDataError(.restoreNotFound)
     }
 
+    /// CloudKit import đến muộn (sau khi UI đã báo lỗi) — tự hoàn tất restore nếu data vừa sync xuống.
+    func handleLateRestoreDataArrival() {
+        guard OnboardingStore.restoreSessionActive else { return }
+        guard MemoryStore.hasPrivateCoupleDataOnly() else { return }
+
+        switch step {
+        case .restoreDataLoading, .restoreDataError:
+            MemoryLog.restore("handleLateRestoreDataArrival: data đến muộn — finish restore")
+            finishRestoreProbe()
+        default:
+            break
+        }
+    }
+
     private func finishRestoreProbe() {
+        MemoryLog.restore("finishRestoreProbe: restore thành công")
+        MemoryStore.logPrivateStoreSnapshot(reason: "restore success")
         OnboardingStore.finishRestoreSession()
         MemoryStore.save(spaceMembership: .ownLocal)
         OnboardingStore.save(role: .first)
         role = .first
         MemoryStore.save(onboardingCompleted: true)
+        OnboardingStore.flushPendingRoleToStoreIfNeeded()
         Task {
             await loadDraftData()
             step = .done

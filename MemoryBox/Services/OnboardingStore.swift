@@ -40,6 +40,7 @@ enum OnboardingStore {
     static let acknowledgedLocalAbandonKey = "memoryBox.acknowledgedLocalAbandon"
     static let abandonedLocalDataAtKey = "memoryBox.abandonedLocalDataAt"
     static let inviteBannerDismissedAtKey = "memoryBox.inviteBannerDismissedAt"
+    static let pendingMyRoleKey = "memoryBox.pendingMyRole"
     private static let inviteBannerDismissalDuration: TimeInterval = 7 * 24 * 60 * 60
 
     static var onboardingCompleted: Bool {
@@ -52,6 +53,7 @@ enum OnboardingStore {
             return source
         }
 
+        guard PersistenceController.isBootstrapped else { return .ownPrivate }
         return MemoryStore.isUsingSharedCoupleSpaceHeuristic() ? .sharedInvite : .ownPrivate
     }
 
@@ -61,6 +63,8 @@ enum OnboardingStore {
 
     static func save(activeDataSource: ActiveDataSource) {
         UserDefaults.standard.set(activeDataSource.rawValue, forKey: activeDataSourceKey)
+        guard PersistenceController.isBootstrapped else { return }
+        if OnboardingStore.restoreSessionActive { return }
         if activeDataSource == .ownPrivate || MemoryStore.hasSharedCoupleSpace() {
             MemoryStore.save(activeDataSource: activeDataSource)
         }
@@ -167,9 +171,22 @@ enum OnboardingStore {
         save(activeDataSource: activeDataSource)
         MemoryStore.save(spaceMembership: membership)
         MemoryStore.save(onboardingCompleted: true)
+        OnboardingStore.flushPendingRoleToStoreIfNeeded()
     }
 
     static func save(role: MessageSenderRole) {
+        UserDefaults.standard.set(role.rawValue, forKey: pendingMyRoleKey)
+        guard onboardingCompleted else { return }
+        MemoryStore.save(myRole: role)
+    }
+
+    static func pendingRole() -> MessageSenderRole? {
+        guard let raw = UserDefaults.standard.string(forKey: pendingMyRoleKey) else { return nil }
+        return MessageSenderRole(rawValue: raw)
+    }
+
+    static func flushPendingRoleToStoreIfNeeded() {
+        guard onboardingCompleted, let role = pendingRole() else { return }
         MemoryStore.save(myRole: role)
     }
 

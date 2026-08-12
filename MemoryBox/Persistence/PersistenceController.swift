@@ -3,9 +3,53 @@ import Foundation
 import CloudKit
 
 final class PersistenceController {
-    static let shared = PersistenceController()
-
     static let cloudKitContainerIdentifier = "iCloud.quan.memory.box.MemoryBox"
+
+    private static var instance: PersistenceController?
+    static var lastCloudKitImportFinishedAt: Date?
+    static var lastCloudKitSetupFinishedAt: Date?
+
+    /// CloudKit-backed store đã sẵn sàng (sau khi user chọn onboarding, hoặc đã complete).
+    static var isBootstrapped: Bool { instance != nil }
+
+    static var shared: PersistenceController {
+        guard let instance else {
+            preconditionFailure("PersistenceController.bootstrapIfNeeded() must run before accessing shared")
+        }
+        return instance
+    }
+
+    /// Chỉ bootstrap khi đã qua Welcome (completed / session dang dở). Welcome thuần không mở CloudKit.
+    static func bootstrapForAppLaunchIfNeeded() {
+        let completed = UserDefaults.standard.bool(forKey: OnboardingStore.completedKey)
+        let restoreActive = UserDefaults.standard.bool(forKey: OnboardingStore.restoreSessionActiveKey)
+        let importActive = UserDefaults.standard.bool(forKey: OnboardingStore.importSessionActiveKey)
+        MemoryLog.bootstrap(
+            "bootstrapForAppLaunchIfNeeded: completed=\(completed) restoreSession=\(restoreActive) importSession=\(importActive) bootstrapped=\(isBootstrapped)"
+        )
+        let needsCloudKit = completed || restoreActive || importActive
+        guard needsCloudKit else {
+            MemoryLog.bootstrap("bootstrapForAppLaunchIfNeeded: skip — chưa complete / session, Welcome không mở CloudKit")
+            return
+        }
+        bootstrapIfNeeded()
+    }
+
+    /// Mở Core Data + CloudKit. Gọi khi user chọn 1 trong 3 option (hoặc accept share).
+    @discardableResult
+    static func bootstrapIfNeeded() -> PersistenceController {
+        if let instance {
+            MemoryLog.bootstrap("bootstrapIfNeeded: đã bootstrapped, bỏ qua")
+            return instance
+        }
+        MemoryLog.bootstrap("bootstrapIfNeeded: bắt đầu load persistent stores + CloudKit")
+        let created = PersistenceController()
+        instance = created
+        MemoryLog.bootstrap(
+            "bootstrapIfNeeded: hoàn tất — privateStore=\(created.privatePersistentStore != nil) sharedStore=\(created.sharedPersistentStore != nil)"
+        )
+        return created
+    }
 
     let container: NSPersistentContainer
     private(set) var privatePersistentStore: NSPersistentStore?
@@ -34,7 +78,11 @@ final class PersistenceController {
         var loadedSharedStore: NSPersistentStore?
         container.loadPersistentStores { description, error in
             if let error {
+                MemoryLog.bootstrap("loadPersistentStores FAILED url=\(description.url?.lastPathComponent ?? "?") error=\(error.localizedDescription)")
                 assertionFailure("Unable to load Core Data store: \(error.localizedDescription)")
+            } else {
+                let scope = description.cloudKitContainerOptions?.databaseScope.rawValue ?? -1
+                MemoryLog.bootstrap("loadPersistentStores OK url=\(description.url?.lastPathComponent ?? "?") cloudKitScope=\(scope)")
             }
 
             guard let storeURL = description.url else { return }
@@ -90,10 +138,22 @@ final class PersistenceController {
             else { return }
 
             if event.succeeded {
-                print("MemoryBox CloudKit \(event.type.logName) succeeded")
+                if event.type == .import {
+                    PersistenceController.lastCloudKitImportFinishedAt = event.endDate ?? Date()
+                }
+                if event.type == .setup {
+                    PersistenceController.lastCloudKitSetupFinishedAt = event.endDate ?? Date()
+                }
+                MemoryLog.cloudKit("\(event.type.logName) succeeded — shouldReload=\(event.type.shouldReloadLocalStore) shouldNotify=\(event.type.shouldNotifyRemoteUpdate)")
                 if event.type.shouldReloadLocalStore {
                     Task { @MainActor in
                         MemoryStore.reconcileAfterCloudSync()
+                        MemoryStore.logPrivateStoreSnapshot(reason: "sau CloudKit \(event.type.logName)")
+                        if OnboardingStore.restoreSessionActive,
+                           MemoryStore.hasPrivateCoupleDataOnly() {
+                            MemoryLog.restore("CloudKit \(event.type.logName): dữ liệu private đã có — notify restore")
+                            NotificationCenter.default.post(name: .restorePrivateDataDidArrive, object: nil)
+                        }
                         NotificationCenter.default.post(name: .memoryStoreDidChange, object: nil)
                         if event.type.shouldNotifyRemoteUpdate {
                             await MemoryStore.notifyAfterRemoteImportIfNeeded()
@@ -101,7 +161,7 @@ final class PersistenceController {
                     }
                 }
             } else {
-                print("MemoryBox CloudKit \(event.type.logName) failed: \(event.error?.localizedDescription ?? "Unknown error")")
+                MemoryLog.cloudKit("\(event.type.logName) FAILED: \(event.error?.localizedDescription ?? "Unknown error")")
             }
         }
     }
@@ -407,6 +467,9 @@ enum MemoryStore {
     }
 
     static func loadMyRole() -> MessageSenderRole? {
+        if !loadOnboardingCompleted(), let pending = OnboardingStore.pendingRole() {
+            return pending
+        }
         migrateUserDefaultsIfNeeded()
         return (activeSettingsObject()?.value(forKey: "myRoleRawValue") as? String)
             .flatMap(MessageSenderRole.init(rawValue:))
@@ -414,6 +477,11 @@ enum MemoryStore {
 
     static func save(myRole: MessageSenderRole) {
         migrateUserDefaultsIfNeeded()
+        guard !OnboardingStore.restoreSessionActive else {
+            MemoryLog.restore("save(myRole): restore session — chỉ lưu UserDefaults")
+            UserDefaults.standard.set(myRole.rawValue, forKey: OnboardingStore.pendingMyRoleKey)
+            return
+        }
         let settings = existingOrNewSettings()
         settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
         settings.setValue(myRole.rawValue, forKey: "myRoleRawValue")
@@ -432,6 +500,10 @@ enum MemoryStore {
 
     static func save(spaceMembership: SpaceMembership) {
         migrateUserDefaultsIfNeeded()
+        guard !OnboardingStore.restoreSessionActive else {
+            MemoryLog.restore("save(spaceMembership): restore session — bỏ qua (chưa restore xong)")
+            return
+        }
         let settings = existingOrNewSettings()
         settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
         settings.setValue(spaceMembership.rawValue, forKey: "spaceMembershipRawValue")
@@ -440,6 +512,10 @@ enum MemoryStore {
 
     static func save(activeDataSource: ActiveDataSource) {
         migrateUserDefaultsIfNeeded()
+        guard !OnboardingStore.restoreSessionActive else {
+            MemoryLog.restore("save(activeDataSource): restore session — chỉ UserDefaults")
+            return
+        }
         let settings = existingOrNewSettings()
         settings.setValue(existingOrNewCoupleSpace(), forKey: "space")
         settings.setValue(activeDataSource.rawValue, forKey: "activeDataSourceRawValue")
@@ -449,19 +525,84 @@ enum MemoryStore {
     static func hasLocalCoupleData() -> Bool {
         migrateUserDefaultsIfNeeded()
         let privateStore = PersistenceController.shared.privatePersistentStore
-        guard privateStore != nil else { return false }
+        guard privateStore != nil else {
+            MemoryLog.restore("hasLocalCoupleData: privateStore=nil → false")
+            return false
+        }
 
-        if !fetchObjects(entityName: "StoredMemory", in: privateStore).isEmpty { return true }
-        if !fetchObjects(entityName: "StoredLetter", in: privateStore).isEmpty { return true }
-        if !fetchObjects(entityName: "StoredSpecialDay", in: privateStore).isEmpty { return true }
+        let memoryCount = fetchObjects(entityName: "StoredMemory", in: privateStore).count
+        let letterCount = fetchObjects(entityName: "StoredLetter", in: privateStore).count
+        let specialDayCount = fetchObjects(entityName: "StoredSpecialDay", in: privateStore).count
+        let photoCount = fetchObjects(entityName: "StoredMemoryPhoto", in: privateStore).count
         let settings = fetchFirstObject(
             entityName: "AppSettings",
             predicate: NSPredicate(format: "id == %@", settingsID),
             in: privateStore
         )
-        if settings?.value(forKey: "startDateIsSet") as? Bool == true { return true }
+        let startDateIsSet = settings?.value(forKey: "startDateIsSet") as? Bool == true
         let profile = settings.flatMap(makeProfile) ?? .empty
-        return !profile.firstName.trimmed.isEmpty || !profile.secondName.trimmed.isEmpty
+        let hasProfileNames = !profile.firstName.trimmed.isEmpty || !profile.secondName.trimmed.isEmpty
+        let hasSpace = coupleSpaceObject(in: privateStore) != nil
+
+        let found = memoryCount > 0 || letterCount > 0 || specialDayCount > 0 || photoCount > 0 || startDateIsSet || hasProfileNames
+        MemoryLog.restore(
+            "hasLocalCoupleData: memories=\(memoryCount) photos=\(photoCount) letters=\(letterCount) specialDays=\(specialDayCount) startDateSet=\(startDateIsSet) profileNames=\(hasProfileNames) coupleSpace=\(hasSpace) → \(found)"
+        )
+        return found
+    }
+
+    /// Snapshot private store — dùng khi debug reinstall / restore.
+    static func logPrivateStoreSnapshot(reason: String) {
+        guard PersistenceController.isBootstrapped,
+              let privateStore = PersistenceController.shared.privatePersistentStore else {
+            MemoryLog.restore("snapshot[\(reason)]: chưa bootstrap hoặc không có privateStore")
+            return
+        }
+        let memoryCount = fetchObjects(entityName: "StoredMemory", in: privateStore).count
+        let letterCount = fetchObjects(entityName: "StoredLetter", in: privateStore).count
+        let specialDayCount = fetchObjects(entityName: "StoredSpecialDay", in: privateStore).count
+        let photoCount = fetchObjects(entityName: "StoredMemoryPhoto", in: privateStore).count
+        let spaceCount = fetchObjects(entityName: "CoupleSpace", in: privateStore).count
+        let settingsCount = fetchObjects(entityName: "AppSettings", in: privateStore).count
+        let sharedMemoryCount = PersistenceController.shared.sharedPersistentStore.map {
+            fetchObjects(entityName: "StoredMemory", in: $0).count
+        } ?? 0
+        let onboardingCompleted = loadOnboardingCompleted()
+        let importAt = PersistenceController.lastCloudKitImportFinishedAt?.description ?? "nil"
+        MemoryLog.restore(
+            "snapshot[\(reason)]: private memories=\(memoryCount) photos=\(photoCount) letters=\(letterCount) specialDays=\(specialDayCount) spaces=\(spaceCount) settings=\(settingsCount) sharedMemories=\(sharedMemoryCount) onboardingCompleted=\(onboardingCompleted) lastImport=\(importAt)"
+        )
+    }
+
+    private static func shouldCreateEmptyCoupleRecords() -> Bool {
+        if OnboardingStore.restoreSessionActive {
+            return false
+        }
+        return true
+    }
+
+    private static func existingOrNewCoupleSpace() -> NSManagedObject {
+        if let space = activeCoupleSpaceObject() {
+            return space
+        }
+
+        if let privateStore = PersistenceController.shared.privatePersistentStore,
+           let imported = coupleSpaceObject(in: privateStore) {
+            return imported
+        }
+
+        guard shouldCreateEmptyCoupleRecords() else {
+            MemoryLog.restore("existingOrNewCoupleSpace: không tạo shell rỗng (restore session)")
+            preconditionFailure("CoupleSpace missing during restore — should not write Core Data yet")
+        }
+
+        let targetStore = activeCoupleStore() ?? PersistenceController.shared.privatePersistentStore
+        let space = NSManagedObject(entity: entityDescription(named: "CoupleSpace"), insertInto: context)
+        assign(space, to: targetStore)
+        space.setValue(coupleSpaceID, forKey: "id")
+        space.setValue(Date(), forKey: "createdAt")
+        MemoryLog.bootstrap("existingOrNewCoupleSpace: tạo CoupleSpace mới trên store private")
+        return space
     }
 
     static func hasPrivateCoupleDataOnly() -> Bool {
@@ -481,10 +622,12 @@ enum MemoryStore {
     }
 
     static func loadOnboardingCompleted() -> Bool {
-        migrateUserDefaultsIfNeeded()
         let local = UserDefaults.standard.bool(forKey: OnboardingStore.completedKey)
+        if local { return true }
+        guard PersistenceController.isBootstrapped else { return false }
+        migrateUserDefaultsIfNeeded()
         let synced = activeSettingsObject()?.value(forKey: "onboardingCompleted") as? Bool ?? false
-        return local || synced
+        return synced
     }
 
     static func save(onboardingCompleted: Bool) {
@@ -825,6 +968,7 @@ enum MemoryStore {
     }
 
     static func acceptShareInvitation(_ metadata: CKShare.Metadata) {
+        PersistenceController.bootstrapIfNeeded()
         MemoryLog.share("acceptShareInvitation: nhận metadata (owner=\(metadata.ownerIdentity.userRecordID?.recordName ?? "nil"))")
         guard let sharedStore = PersistenceController.shared.sharedPersistentStore else {
             MemoryLog.share("acceptShareInvitation: thiếu sharedPersistentStore -> bỏ qua")
@@ -880,11 +1024,13 @@ enum MemoryStore {
     /// Call after CloudKit setup/import so reinstall restores names, start date, and content
     /// instead of keeping empty local placeholders that raced ahead of the sync.
     static func reconcileAfterCloudSync() {
+        MemoryLog.cloudKit("reconcileAfterCloudSync: bắt đầu")
         purgeLegacyLetters()
         deduplicateCoupleSpaces()
         deduplicateSettings()
         migrateMisplacedMessagesToActiveStore()
         saveContext()
+        logPrivateStoreSnapshot(reason: "reconcileAfterCloudSync")
     }
 
     /// Migration writes on the main-thread viewContext, so hop to the main actor before reads.
@@ -902,6 +1048,7 @@ enum MemoryStore {
             || anySettingsObject() != nil
 
         guard !hasCoreDataContent else {
+            MemoryLog.restore("migrateUserDefaultsIfNeeded: Core Data đã có content — skip UserDefaults migrate")
             UserDefaults.standard.set(true, forKey: didMigrateKey)
             return
         }
@@ -920,10 +1067,12 @@ enum MemoryStore {
             || storedStartDateValue != nil
 
         guard hasUserDefaultsContent else {
+            MemoryLog.restore("migrateUserDefaultsIfNeeded: reinstall — UserDefaults trống, không tạo record rỗng (đợi CloudKit)")
             UserDefaults.standard.set(true, forKey: didMigrateKey)
             return
         }
 
+        MemoryLog.restore("migrateUserDefaultsIfNeeded: migrate từ UserDefaults — memories=\(memories.count) specialDays=\(specialDays.count)")
         let startDate = storedStartDateValue.map(Date.init(timeIntervalSince1970:)) ?? Date()
         let space = existingOrNewCoupleSpace()
         let targetStore = persistentStore(for: space) ?? PersistenceController.shared.privatePersistentStore
@@ -1490,19 +1639,6 @@ enum MemoryStore {
         coupleSpaceObject(in: activeCoupleStore(ctx), ctx)
     }
 
-    private static func existingOrNewCoupleSpace() -> NSManagedObject {
-        if let space = activeCoupleSpaceObject() {
-            return space
-        }
-
-        let targetStore = activeCoupleStore() ?? PersistenceController.shared.privatePersistentStore
-        let space = NSManagedObject(entity: entityDescription(named: "CoupleSpace"), insertInto: context)
-        assign(space, to: targetStore)
-        space.setValue(coupleSpaceID, forKey: "id")
-        space.setValue(Date(), forKey: "createdAt")
-        return space
-    }
-
     private static func coupleSpaceObject(
         in store: NSPersistentStore? = nil,
         _ ctx: NSManagedObjectContext = context
@@ -1537,6 +1673,11 @@ enum MemoryStore {
             in: targetStore
         ) {
             return settings
+        }
+
+        guard shouldCreateEmptyCoupleRecords() else {
+            MemoryLog.restore("existingOrNewSettings: không tạo shell rỗng (restore session)")
+            preconditionFailure("AppSettings missing during restore — should not write Core Data yet")
         }
 
         let space = existingOrNewCoupleSpace()

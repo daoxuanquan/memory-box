@@ -8,16 +8,35 @@ import os
 
 enum MemoryLog {
     private static let sharing = Logger(subsystem: "quan.memory.box.MemoryBox", category: "sharing")
+    private static let bootstrap = Logger(subsystem: "quan.memory.box.MemoryBox", category: "bootstrap")
+    private static let restore = Logger(subsystem: "quan.memory.box.MemoryBox", category: "restore")
+    private static let cloudKit = Logger(subsystem: "quan.memory.box.MemoryBox", category: "cloudkit")
 
     static func share(_ message: String) {
         sharing.log("[MemoryBox][Share] \(message, privacy: .public)")
         print("[MemoryBox][Share] \(message)")
+    }
+
+    static func bootstrap(_ message: String) {
+        bootstrap.log("[MemoryBox][Bootstrap] \(message, privacy: .public)")
+        print("[MemoryBox][Bootstrap] \(message)")
+    }
+
+    static func restore(_ message: String) {
+        restore.log("[MemoryBox][Restore] \(message, privacy: .public)")
+        print("[MemoryBox][Restore] \(message)")
+    }
+
+    static func cloudKit(_ message: String) {
+        cloudKit.log("[MemoryBox][CloudKit] \(message, privacy: .public)")
+        print("[MemoryBox][CloudKit] \(message)")
     }
 }
 
 extension Notification.Name {
     static let memoryStoreDidChange = Notification.Name("memoryStoreDidChange")
     static let coupleShareDidAccept = Notification.Name("coupleShareDidAccept")
+    static let restorePrivateDataDidArrive = Notification.Name("restorePrivateDataDidArrive")
 }
 
 extension Date {
